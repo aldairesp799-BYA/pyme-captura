@@ -25,7 +25,8 @@
       "Bash(git commit *)",
       "Bash(git config *)",
       "Bash(python -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\)\\) or print\\(f, 'OK'\\) for f in ['app.py','webhook.py','extractor.py','database.py']]\")",
-      "Bash(python -c \"import ast; files=['app.py','webhook.py','extractor.py','database.py']; [print\\(f, 'OK'\\) for f in files if ast.parse\\(open\\(f,encoding='utf-8'\\).read\\(\\)\\) is not None]\")"
+      "Bash(python -c \"import ast; files=['app.py','webhook.py','extractor.py','database.py']; [print\\(f, 'OK'\\) for f in files if ast.parse\\(open\\(f,encoding='utf-8'\\).read\\(\\)\\) is not None]\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

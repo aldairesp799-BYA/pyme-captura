@@ -157,6 +157,13 @@ def get_products_summary() -> list:
     return [{"producto": k, **v} for k, v in summary.items()]
 
 
+def get_all_as_df() -> "pd.DataFrame":
+    rows = get_all_documents()
+    if not rows:
+        return pd.DataFrame(columns=["id","tipo","fecha_cap","fecha_doc","entidad","folio","total","productos"])
+    return pd.DataFrame(rows, columns=["id","tipo","fecha_cap","fecha_doc","entidad","folio","total","productos"])
+
+
 def delete_all():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM documentos")
