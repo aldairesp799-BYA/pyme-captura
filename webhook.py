@@ -125,9 +125,10 @@ def _xml(resp: MessagingResponse) -> PlainTextResponse:
 async def _download(url: str) -> bytes:
     sid   = os.getenv("TWILIO_ACCOUNT_SID", "")
     token = os.getenv("TWILIO_AUTH_TOKEN", "")
-    auth  = (sid, token) if sid else None
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(url, auth=auth)
+    if not sid or not token:
+        raise ValueError("TWILIO_ACCOUNT_SID o TWILIO_AUTH_TOKEN no están configurados en las variables de entorno")
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        r = await client.get(url, auth=(sid, token))
         r.raise_for_status()
         return r.content
 
