@@ -11,7 +11,7 @@ from fastapi import FastAPI, Form
 from fastapi.responses import PlainTextResponse
 from twilio.twiml.messaging_response import MessagingResponse
 
-load_dotenv()
+load_dotenv(override=False)  # Railway/producción: las vars del sistema siempre ganan
 
 # Secrets bridge para Railway / Render
 # (en local usa .env, en la nube las variables de entorno del servicio)
