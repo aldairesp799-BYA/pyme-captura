@@ -38,6 +38,16 @@ _LABEL = {
     "venta_publico":  "venta al público (sin nota formal)",
 }
 
+_AUTO_SCHEMA = """{
+  "tipo": "factura_compra | nota_venta | venta_publico",
+  "proveedor": "si es compra, sino null",
+  "cliente": "si es venta con cliente identificable, sino null",
+  "fecha": "DD/MM/YYYY si aparece en el documento, sino null",
+  "folio": "número de folio o null",
+  "productos": [{"nombre":"...","cantidad":0,"unidad":"pz/kg/lt/caja/etc","precio_unitario":0.0,"precio_total":0.0}],
+  "total": 0.0
+}"""
+
 
 def _strip_json(content: str) -> str:
     content = content.strip()
@@ -139,31 +149,74 @@ Responde SOLO un array JSON: [{_SCHEMA[document_type]}, ...]"""
     return json.loads(_strip_json(resp.choices[0].message.content))
 
 
+def extract_from_image_auto(image_bytes: bytes) -> dict:
+    """Extrae de imagen auto-detectando si es compra, venta o venta al público."""
+    img = Image.open(io.BytesIO(image_bytes))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+
+    resp = _get_client().chat.completions.create(
+        model=VISION_MODEL,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Eres experto en documentos de PyMEs mexicanas. Determina si este documento es una compra (factura_compra), venta con cliente (nota_venta) o venta sin cliente (venta_publico). Extrae TODOS los campos incluyendo unidad de medida. Responde SOLO JSON válido:\n{_AUTO_SCHEMA}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ],
+        }],
+        max_tokens=1400,
+        temperature=0,
+    )
+    return json.loads(_strip_json(resp.choices[0].message.content))
+
+
+def extract_from_text_auto(text: str) -> dict:
+    """Extrae de texto libre auto-detectando tipo de documento."""
+    resp = _get_client().chat.completions.create(
+        model=TEXT_MODEL,
+        messages=[{"role": "user", "content": f'Extrae datos de esta descripción de operación de una PyME mexicana. Determina si es compra o venta. El texto puede ser coloquial:\n"{text}"\n\nResponde SOLO JSON válido:\n{_AUTO_SCHEMA}'}],
+        max_tokens=1000,
+        temperature=0,
+    )
+    return json.loads(_strip_json(resp.choices[0].message.content))
+
+
+def extract_from_audio_auto(audio_bytes: bytes, filename: str) -> tuple:
+    """Transcribe audio y extrae datos auto-detectando tipo."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "ogg"
+    mime = _MIME.get(ext, "audio/ogg")
+    result = _get_client().audio.transcriptions.create(
+        file=(filename, audio_bytes, mime),
+        model=AUDIO_MODEL,
+        language="es",
+        response_format="text",
+    )
+    transcript = str(result)
+    data = extract_from_text_auto(transcript)
+    return transcript, data
+
+
 def analyze_business(context: str, period_label: str = "histórico completo") -> str:
     resp = _get_client().chat.completions.create(
         model=TEXT_MODEL,
-        messages=[{"role": "user", "content": f"""Eres consultor de PyMEs mexicanas especializado en "consultoría inversa": analizas datos de inventario, compras y ventas, y presentas lo más importante sin que el dueño te pida nada.
+        messages=[{"role": "user", "content": f"""Eres consultor de PyMEs mexicanas especializado en "consultoría inversa".
+
+IMPORTANTE: Cada registro tiene una fecha de documento (cuando ocurrió la operación real) y una fecha de captura (cuando se subió al sistema). Usa SIEMPRE la fecha del documento para el análisis temporal, nunca la fecha de captura.
 
 Período analizado: {period_label}
 
 Datos del negocio:
 {context}
 
-Entrega el análisis con estas secciones (si no hay suficientes datos para alguna, dilo brevemente):
-
 ## 📊 Resumen Financiero
-(totales, margen si hay ventas y compras, flujo estimado)
-
-## 🔴 Alertas
-(máximo 3, solo lo realmente crítico para este negocio)
-
-## 💡 Top 5 Recomendaciones
-(concretas para ESTE negocio, no genéricas — basadas en los datos reales)
-
+## 🔴 Alertas (máximo 3)
+## 💡 Top 5 Recomendaciones (basadas en datos reales de este negocio)
 ## 📈 Oportunidades Detectadas
-(qué podría hacer el negocio para crecer o reducir costos basado en sus datos)
 
-Usa lenguaje simple y directo. Sin jerga técnica. El dueño es práctico."""}],
+Lenguaje simple, directo, sin jerga técnica."""}],
         max_tokens=2000,
         temperature=0.3,
     )

@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__cue__telemetry_slash",
+      "mcp__cue__memory_session-open",
+      "Bash(git --version)",
+      "Bash(streamlit --version)",
+      "PowerShell(python -m streamlit --version 2>&1)",
+      "Skill(update-config)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\([k for k in d.keys\\(\\)]\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -c \"import streamlit, groq, pandas, PIL, openpyxl; print\\('OK'\\)\")",
+      "Bash(python -m streamlit run app.py --server.port 8501)",
+      "Bash(Start-Sleep -Seconds 4)",
+      "Bash(Get-Content \"C:\\\\Users\\\\bryan\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-bryan-Projects-pyme-captura\\\\e61f71fe-487a-459f-8277-70719fc5f091\\\\tasks\\\\b0swmhrz9.output\")",
+      "Bash(python -c \"from database import init_db, TIPO_LABEL, build_context, check_duplicate, delete_all, export_csv, get_all_documents, get_filtered_documents, save_document; from extractor import analyze_business, chat_with_agent, extract_from_audio, extract_from_excel, extract_from_image, extract_from_text; print\\('OK'\\)\")",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); ast.parse\\(open\\('database.py'\\).read\\(\\)\\); ast.parse\\(open\\('extractor.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import importlib.util; spec = importlib.util.spec_from_file_location\\('database', 'database.py'\\); m = importlib.util.module_from_spec\\(spec\\); spec.loader.exec_module\\(m\\); print\\(dir\\(m\\)\\)\")",
+      "Bash(Remove-Item -Recurse -Force \"C:\\\\Users\\\\bryan\\\\Projects\\\\pyme-captura\\\\__pycache__\" -ErrorAction SilentlyContinue)",
+      "Bash(Write-Host \"Cache limpio\")",
+      "Bash(python -c \"import shutil; shutil.rmtree\\('__pycache__', ignore_errors=True\\); print\\('Cache limpio'\\)\")",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git config *)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\)\\) or print\\(f, 'OK'\\) for f in ['app.py','webhook.py','extractor.py','database.py']]\")",
+      "Bash(python -c \"import ast; files=['app.py','webhook.py','extractor.py','database.py']; [print\\(f, 'OK'\\) for f in files if ast.parse\\(open\\(f,encoding='utf-8'\\).read\\(\\)\\) is not None]\")"
+    ]
+  }
+}

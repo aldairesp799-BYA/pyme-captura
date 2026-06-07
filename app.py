@@ -107,7 +107,16 @@ def _show_review(draft: dict):
         entidad_label = "Proveedor" if tipo == "factura_compra" else "Cliente"
         entidad = st.text_input(entidad_label, value=draft.get("proveedor") or draft.get("cliente") or "", key="rev_entidad")
     with col2:
-        fecha = st.text_input("Fecha (DD/MM/YYYY)", value=draft.get("fecha") or "", key="rev_fecha")
+        fecha_val = draft.get("fecha") or ""
+        if not fecha_val:
+            st.warning("⚠️ No se detectó fecha en el documento.")
+        fecha = st.text_input(
+            "Fecha del documento (DD/MM/YYYY) *",
+            value=fecha_val,
+            placeholder=date.today().strftime("%d/%m/%Y"),
+            key="rev_fecha",
+            help="Usa la fecha que aparece en el documento, no de hoy",
+        )
     with col3:
         folio = st.text_input("Folio", value=draft.get("folio") or "", key="rev_folio", disabled=(tipo == "venta_publico"))
 
@@ -133,6 +142,9 @@ def _show_review(draft: dict):
         return "discard", None
 
     if confirmed:
+        if not fecha.strip():
+            st.error("La fecha del documento es obligatoria. Ingresa cuándo se generó.")
+            return "waiting", None
         final = {
             "tipo":   tipo,
             "fecha":  fecha,
