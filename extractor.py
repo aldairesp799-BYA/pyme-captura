@@ -7,7 +7,13 @@ from groq import Groq
 from PIL import Image
 import pandas as pd
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_client = None
+
+def _get_client() -> Groq:
+    global _client
+    if _client is None:
+        _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    return _client
 
 TEXT_MODEL = "llama-3.3-70b-versatile"
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -51,7 +57,7 @@ def extract_from_image(image_file, document_type: str) -> dict:
     b64 = base64.b64encode(buf.getvalue()).decode()
 
     label = _LABEL[document_type]
-    resp = client.chat.completions.create(
+    resp = _get_client().chat.completions.create(
         model=VISION_MODEL,
         messages=[{
             "role": "user",
@@ -68,7 +74,7 @@ def extract_from_image(image_file, document_type: str) -> dict:
 
 def extract_from_text(text: str, document_type: str) -> dict:
     label = _LABEL[document_type]
-    resp = client.chat.completions.create(
+    resp = _get_client().chat.completions.create(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": f'Extrae datos de esta descripción de {label} mexicana. Infiere la unidad de medida si no se menciona explícitamente. El texto puede ser coloquial o tener errores:\n"{text}"\n\nResponde SOLO JSON válido:\n{_SCHEMA[document_type]}'}],
         max_tokens=1000,
@@ -81,7 +87,7 @@ def extract_from_audio(audio_bytes: bytes, filename: str, document_type: str) ->
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp3"
     mime = _MIME.get(ext, "audio/mpeg")
 
-    result = client.audio.transcriptions.create(
+    result = _get_client().audio.transcriptions.create(
         file=(filename, audio_bytes, mime),
         model=AUDIO_MODEL,
         language="es",
@@ -124,7 +130,7 @@ Datos:
 
 Responde SOLO un array JSON: [{_SCHEMA[document_type]}, ...]"""
 
-    resp = client.chat.completions.create(
+    resp = _get_client().chat.completions.create(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=4000,
@@ -134,7 +140,7 @@ Responde SOLO un array JSON: [{_SCHEMA[document_type]}, ...]"""
 
 
 def analyze_business(context: str, period_label: str = "histórico completo") -> str:
-    resp = client.chat.completions.create(
+    resp = _get_client().chat.completions.create(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": f"""Eres consultor de PyMEs mexicanas especializado en "consultoría inversa": analizas datos de inventario, compras y ventas, y presentas lo más importante sin que el dueño te pida nada.
 
@@ -172,7 +178,7 @@ def chat_with_agent(context: str, history: list, question: str) -> str:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": question})
 
-    resp = client.chat.completions.create(
+    resp = _get_client().chat.completions.create(
         model=TEXT_MODEL,
         messages=messages,
         max_tokens=500,
