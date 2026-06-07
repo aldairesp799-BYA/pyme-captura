@@ -44,6 +44,13 @@ st.markdown("""
 div[data-testid="stVerticalBlock"] > div:has(> [data-testid="stButton"]) button[kind="primary"] {
     height:64px; font-size:18px;
 }
+/* Cámara más grande en móvil */
+[data-testid="stCameraInput"] > div { border-radius:16px; overflow:hidden; }
+[data-testid="stCameraInput"] video { min-height:260px; object-fit:cover; }
+[data-testid="stCameraInput"] button {
+    height:56px !important; font-size:17px !important;
+    border-radius:12px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -93,7 +100,7 @@ def _process_and_draft(raw_bytes: bytes, filename: str = "imagen.jpg"):
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
 st.title("📦 PyME Captura")
-tab_home, tab_cap, tab_reg, tab_agent = st.tabs(["📊 Inicio", "📸 Capturar", "📋 Registros", "🤖 Agente IA"])
+tab_cap, tab_home, tab_reg, tab_agent = st.tabs(["📸 Capturar", "📊 Inicio", "📋 Registros", "🤖 Agente IA"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -103,90 +110,126 @@ with tab_home:
     df_all = _parse_df_dates(get_all_as_df())
 
     if df_all.empty:
-        st.info("Aún no hay registros. Ve a **Capturar** para empezar.")
-        st.stop()
-
-    today = pd.Timestamp(date.today())
-    week_start = today - pd.Timedelta(days=today.dayofweek)
-    month_start = today.replace(day=1)
-
-    compras = df_all[df_all["tipo"] == "factura_compra"]
-    ventas  = df_all[df_all["tipo"].isin(["nota_venta","venta_publico"])]
-
-    # ── Métricas rápidas ──────────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("📥 Compras (mes)",  f"${compras[compras['fecha'] >= month_start]['total'].sum():,.0f}")
-    c2.metric("📤 Ventas (mes)",   f"${ventas[ventas['fecha'] >= month_start]['total'].sum():,.0f}")
-    c3.metric("📥 Compras (semana)", f"${compras[compras['fecha'] >= week_start]['total'].sum():,.0f}")
-    c4.metric("📤 Ventas (semana)",  f"${ventas[ventas['fecha'] >= week_start]['total'].sum():,.0f}")
-
-    # ── Gráfica semanal ───────────────────────────────────────────────────────
-    st.subheader("Actividad semanal")
-    df_w = df_all[df_all["fecha"].notna()].copy()
-    df_w["semana"] = df_w["fecha"].dt.to_period("W").dt.start_time
-    df_w["Tipo"] = df_w["tipo"].map({"factura_compra":"Compras","nota_venta":"Ventas","venta_publico":"Ventas"})
-
-    weekly = df_w.groupby(["semana","Tipo"])["total"].sum().reset_index()
-    weekly = weekly[weekly["semana"] >= (today - pd.Timedelta(weeks=8))]
-
-    if not weekly.empty:
-        fig = px.bar(
-            weekly, x="semana", y="total", color="Tipo",
-            color_discrete_map={"Compras":"#ef4444","Ventas":"#22c55e"},
-            labels={"semana":"Semana","total":"Total ($)"},
-            barmode="group",
-        )
-        fig.update_layout(margin=dict(t=20,b=20), legend_title_text="")
-        st.plotly_chart(fig, use_container_width=True)
+        st.info("Aún no hay registros. Ve a la pestaña **📸 Capturar** para empezar.")
     else:
-        st.caption("No hay datos con fecha para mostrar la gráfica.")
+        today = pd.Timestamp(date.today())
+        week_start = today - pd.Timedelta(days=today.dayofweek)
+        month_start = today.replace(day=1)
 
-    # ── Top proveedores y productos ───────────────────────────────────────────
-    col_a, col_b = st.columns(2)
+        compras = df_all[df_all["tipo"] == "factura_compra"]
+        ventas  = df_all[df_all["tipo"].isin(["nota_venta","venta_publico"])]
 
-    with col_a:
-        st.subheader("Top proveedores")
-        if not compras.empty:
-            top_prov = (
-                compras[compras["entidad"] != ""]
-                .groupby("entidad")["total"].sum()
-                .nlargest(5).reset_index()
-                .rename(columns={"entidad":"Proveedor","total":"Total ($)"})
+        # ── Métricas rápidas ──────────────────────────────────────────────────────
+        today_norm      = today.normalize()
+        prev_week_start = week_start - pd.Timedelta(weeks=1)
+
+        c_mes  = compras[compras["fecha"] >= month_start]["total"].sum()
+        v_mes  = ventas[ventas["fecha"] >= month_start]["total"].sum()
+        c_sem  = compras[compras["fecha"] >= week_start]["total"].sum()
+        v_sem  = ventas[ventas["fecha"] >= week_start]["total"].sum()
+        c_hoy  = compras[compras["fecha"].dt.normalize() == today_norm]["total"].sum()
+        v_hoy  = ventas[ventas["fecha"].dt.normalize() == today_norm]["total"].sum()
+
+        # Hoy (compacto)
+        hoy_txt = f"**Hoy:** Compras ${c_hoy:,.0f}  ·  Ventas ${v_hoy:,.0f}"
+        if c_hoy == 0 and v_hoy == 0:
+            hoy_txt += "  —  sin capturas todavía"
+        st.caption(hoy_txt)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📥 Compras (mes)",    f"${c_mes:,.0f}")
+        c2.metric("📤 Ventas (mes)",     f"${v_mes:,.0f}")
+        c3.metric("📥 Compras (semana)", f"${c_sem:,.0f}")
+        c4.metric("📤 Ventas (semana)",  f"${v_sem:,.0f}")
+
+        # ── Alertas automáticas ───────────────────────────────────────────────────
+        c_prev = compras[(compras["fecha"] >= prev_week_start) & (compras["fecha"] < week_start)]["total"].sum()
+        v_prev = ventas[(ventas["fecha"] >= prev_week_start) & (ventas["fecha"] < week_start)]["total"].sum()
+
+        alerts = []
+        if c_prev > 0 and c_sem > 0:
+            pct_c = (c_sem - c_prev) / c_prev * 100
+            if pct_c > 20:
+                alerts.append(f"📈 Compras esta semana **{pct_c:.0f}% más** que la semana pasada (${c_sem:,.0f} vs ${c_prev:,.0f})")
+            elif pct_c < -20:
+                alerts.append(f"📉 Compras esta semana **{abs(pct_c):.0f}% menos** que la semana pasada — bien controlado")
+        if v_prev > 0 and v_sem > 0:
+            pct_v = (v_sem - v_prev) / v_prev * 100
+            if pct_v > 20:
+                alerts.append(f"🚀 Ventas esta semana **{pct_v:.0f}% más** que la semana pasada (${v_sem:,.0f} vs ${v_prev:,.0f})")
+            elif pct_v < -20:
+                alerts.append(f"⚠️ Ventas esta semana **{abs(pct_v):.0f}% menores** que la semana pasada")
+
+        for a in alerts:
+            st.info(a)
+
+        # ── Gráfica semanal ───────────────────────────────────────────────────────
+        st.subheader("Actividad semanal")
+        df_w = df_all[df_all["fecha"].notna()].copy()
+        df_w["semana"] = df_w["fecha"].dt.to_period("W").dt.start_time
+        df_w["Tipo"] = df_w["tipo"].map({"factura_compra":"Compras","nota_venta":"Ventas","venta_publico":"Ventas"})
+
+        weekly = df_w.groupby(["semana","Tipo"])["total"].sum().reset_index()
+        weekly = weekly[weekly["semana"] >= (today - pd.Timedelta(weeks=8))]
+
+        if not weekly.empty:
+            fig = px.bar(
+                weekly, x="semana", y="total", color="Tipo",
+                color_discrete_map={"Compras":"#ef4444","Ventas":"#22c55e"},
+                labels={"semana":"Semana","total":"Total ($)"},
+                barmode="group",
             )
-            if not top_prov.empty:
-                fig2 = px.bar(
-                    top_prov.sort_values("Total ($)"),
-                    x="Total ($)", y="Proveedor", orientation="h",
-                    color_discrete_sequence=["#ef4444"],
+            fig.update_layout(margin=dict(t=20,b=20), legend_title_text="")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.caption("No hay datos con fecha para mostrar la gráfica.")
+
+        # ── Top proveedores y productos ───────────────────────────────────────────
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            st.subheader("Top proveedores")
+            if not compras.empty:
+                top_prov = (
+                    compras[compras["entidad"] != ""]
+                    .groupby("entidad")["total"].sum()
+                    .nlargest(5).reset_index()
+                    .rename(columns={"entidad":"Proveedor","total":"Total ($)"})
                 )
-                fig2.update_layout(margin=dict(t=10,b=10), showlegend=False)
-                st.plotly_chart(fig2, use_container_width=True)
+                if not top_prov.empty:
+                    fig2 = px.bar(
+                        top_prov.sort_values("Total ($)"),
+                        x="Total ($)", y="Proveedor", orientation="h",
+                        color_discrete_sequence=["#ef4444"],
+                    )
+                    fig2.update_layout(margin=dict(t=10,b=10), showlegend=False)
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.caption("Sin datos de proveedores.")
             else:
-                st.caption("Sin datos de proveedores.")
-        else:
-            st.caption("Sin compras registradas.")
+                st.caption("Sin compras registradas.")
 
-    with col_b:
-        st.subheader("Top productos")
-        all_p = []
-        for _, row in compras.iterrows():
-            try:
-                for p in json.loads(row["productos"]):
-                    if p.get("nombre"):
-                        all_p.append({"Producto": p["nombre"], "Gasto": p.get("precio_total", 0)})
-            except Exception:
-                pass
-        if all_p:
-            df_p = pd.DataFrame(all_p).groupby("Producto")["Gasto"].sum().nlargest(5).reset_index()
-            fig3 = px.bar(
-                df_p.sort_values("Gasto"),
-                x="Gasto", y="Producto", orientation="h",
-                color_discrete_sequence=["#f97316"],
-            )
-            fig3.update_layout(margin=dict(t=10,b=10), showlegend=False)
-            st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.caption("Sin detalle de productos.")
+        with col_b:
+            st.subheader("Top productos")
+            all_p = []
+            for _, row in compras.iterrows():
+                try:
+                    for p in json.loads(row["productos"]):
+                        if p.get("nombre"):
+                            all_p.append({"Producto": p["nombre"], "Gasto": p.get("precio_total", 0)})
+                except Exception:
+                    pass
+            if all_p:
+                df_p = pd.DataFrame(all_p).groupby("Producto")["Gasto"].sum().nlargest(5).reset_index()
+                fig3 = px.bar(
+                    df_p.sort_values("Gasto"),
+                    x="Gasto", y="Producto", orientation="h",
+                    color_discrete_sequence=["#f97316"],
+                )
+                fig3.update_layout(margin=dict(t=10,b=10), showlegend=False)
+                st.plotly_chart(fig3, use_container_width=True)
+            else:
+                st.caption("Sin detalle de productos.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

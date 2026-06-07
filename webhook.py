@@ -127,8 +127,12 @@ async def _download(url: str) -> bytes:
     token = os.getenv("TWILIO_AUTH_TOKEN", "")
     if not sid or not token:
         raise ValueError("TWILIO_ACCOUNT_SID o TWILIO_AUTH_TOKEN no están configurados en las variables de entorno")
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        r = await client.get(url, auth=(sid, token))
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Twilio redirige media a CDN (S3). Enviamos auth solo en la petición inicial;
+        # el redirect se sigue sin auth para que el CDN no rechace el header.
+        r = await client.get(url, auth=(sid, token), follow_redirects=False)
+        if r.is_redirect:
+            r = await client.get(r.headers["location"], follow_redirects=True)
         r.raise_for_status()
         return r.content
 
