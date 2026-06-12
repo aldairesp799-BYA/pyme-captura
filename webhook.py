@@ -53,6 +53,8 @@ async def whatsapp(
             # Si la fecha llegó vacía, usar hoy
             if not data.get("fecha"):
                 data["fecha"] = date.today().strftime("%d/%m/%Y")
+            # WhatsApp no tiene corrección manual — se guarda como confirmado sin edición
+            data.setdefault("sin_modificacion", True)
             save_document(data)
             tipo = {"factura_compra": "Compra", "nota_venta": "Venta", "venta_publico": "Venta"}.get(data.get("tipo", ""), "Documento")
             total = data.get("total") or 0
@@ -74,10 +76,12 @@ async def whatsapp(
 
             if "image" in ct:
                 data = extract_from_image_auto(media_bytes)
+                data["medio"] = "whatsapp_imagen"
 
             elif "audio" in ct or "ogg" in ct or "mpeg" in ct:
                 ext = "ogg" if "ogg" in ct else "mp3"
                 _, data = extract_from_audio_auto(media_bytes, f"audio.{ext}")
+                data["medio"] = "whatsapp_audio"
 
             else:
                 resp.message("📎 Tipo de archivo no soportado. Manda una foto 📷 o nota de voz 🎙️")
@@ -96,6 +100,7 @@ async def whatsapp(
                 )
                 return _xml(resp)
             data = extract_from_text_auto(Body.strip())
+            data["medio"] = "whatsapp_texto"
 
         else:
             resp.message(

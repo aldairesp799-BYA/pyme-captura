@@ -22,7 +22,8 @@ load_dotenv()
 from database import (
     TIPO_LABEL, build_context, check_duplicate, delete_all,
     export_csv, get_all_as_df, get_all_documents,
-    get_filtered_documents, init_db, save_document,
+    get_capture_effectiveness, get_filtered_documents,
+    init_db, next_venta_publica_ref, save_document,
 )
 from extractor import (
     analyze_business, chat_with_agent,
@@ -30,7 +31,7 @@ from extractor import (
     extract_from_image_auto, extract_from_text_auto,
 )
 
-st.set_page_config(page_title="PyME Captura", page_icon="📦", layout="centered")
+st.set_page_config(page_title="Verstockia", page_icon="📦", layout="centered")
 init_db()
 
 st.markdown("""
@@ -40,11 +41,9 @@ st.markdown("""
     border:1px solid #e2e8f0; text-align:center;
 }
 .stTabs [data-baseweb="tab"] { font-size:15px; font-weight:600; }
-[data-testid="stCameraInput"] label { font-size:18px; font-weight:600; }
 div[data-testid="stVerticalBlock"] > div:has(> [data-testid="stButton"]) button[kind="primary"] {
     height:64px; font-size:18px;
 }
-/* Cámara más grande en móvil */
 [data-testid="stCameraInput"] > div { border-radius:16px; overflow:hidden; }
 [data-testid="stCameraInput"] video { min-height:260px; object-fit:cover; }
 [data-testid="stCameraInput"] button {
@@ -54,8 +53,10 @@ div[data-testid="stVerticalBlock"] > div:has(> [data-testid="stButton"]) button[
 </style>
 """, unsafe_allow_html=True)
 
-if "upload_key" not in st.session_state:
-    st.session_state["upload_key"] = 0
+# ── Session state defaults ─────────────────────────────────────────────────────
+for _k, _v in [("upload_key", 0), ("camera_open", False)]:
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,18 @@ PROD_COLS = {
     "precio_total":    st.column_config.NumberColumn("Total", format="$%.2f"),
 }
 EMPTY_PROD = {"nombre":"","cantidad":0,"unidad":"","precio_unitario":0.0,"precio_total":0.0}
+
+MEDIO_LABEL = {
+    "camara":           "📷 Cámara",
+    "galeria":          "🖼 Galería",
+    "audio_grabacion":  "🎙 Audio (grabación)",
+    "audio_archivo":    "📁 Audio (archivo)",
+    "texto":            "✏️ Texto",
+    "excel":            "📊 Excel/CSV",
+    "whatsapp_imagen":  "📱 WhatsApp foto",
+    "whatsapp_audio":   "📱 WhatsApp audio",
+    "whatsapp_texto":   "📱 WhatsApp texto",
+}
 
 
 def _norm_prods(prods):
@@ -92,14 +105,24 @@ def _parse_df_dates(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _process_and_draft(raw_bytes: bytes, filename: str = "imagen.jpg"):
+def _process_and_draft(raw_bytes: bytes, filename: str = "imagen.jpg", medio: str = "galeria"):
     data = extract_from_image_auto(raw_bytes)
     st.session_state["cap_draft"] = data
+    st.session_state["cap_medio"] = medio
     st.session_state.pop("cap_mode", None)
 
 
+def _clear_draft():
+    for k in ["cap_draft", "_bytes", "_name", "cap_transcript", "cap_medio",
+              "agente_analisis", "agente_period",
+              "qr_prods_edit", "qr_prods_resolved", "qr_prods_sig"]:
+        st.session_state.pop(k, None)
+    st.session_state["upload_key"] += 1
+    st.session_state["camera_open"] = False
+
+
 # ── TABS ──────────────────────────────────────────────────────────────────────
-st.title("📦 PyME Captura")
+st.title("📦 Verstockia")
 tab_cap, tab_home, tab_reg, tab_agent = st.tabs(["📸 Capturar", "📊 Inicio", "📋 Registros", "🤖 Agente IA"])
 
 
@@ -112,40 +135,66 @@ with tab_home:
     if df_all.empty:
         st.info("Aún no hay registros. Ve a la pestaña **📸 Capturar** para empezar.")
     else:
-        today = pd.Timestamp(date.today())
-        week_start = today - pd.Timedelta(days=today.dayofweek)
+        today       = pd.Timestamp(date.today())
+        week_start  = today - pd.Timedelta(days=today.dayofweek)
         month_start = today.replace(day=1)
-
-        compras = df_all[df_all["tipo"] == "factura_compra"]
-        ventas  = df_all[df_all["tipo"].isin(["nota_venta","venta_publico"])]
-
-        # ── Métricas rápidas ──────────────────────────────────────────────────────
-        today_norm      = today.normalize()
+        year_start  = today.replace(month=1, day=1)
         prev_week_start = week_start - pd.Timedelta(weeks=1)
 
-        c_mes  = compras[compras["fecha"] >= month_start]["total"].sum()
-        v_mes  = ventas[ventas["fecha"] >= month_start]["total"].sum()
-        c_sem  = compras[compras["fecha"] >= week_start]["total"].sum()
-        v_sem  = ventas[ventas["fecha"] >= week_start]["total"].sum()
-        c_hoy  = compras[compras["fecha"].dt.normalize() == today_norm]["total"].sum()
-        v_hoy  = ventas[ventas["fecha"].dt.normalize() == today_norm]["total"].sum()
+        # ── Selector de período ───────────────────────────────────────────────
+        dash_p = st.selectbox(
+            "Período", ["Hoy", "Esta semana", "Este mes", "Este año", "Todo"],
+            index=2, key="dash_period",
+        )
+        _mask = {
+            "Hoy":         df_all["fecha"].dt.normalize() == today.normalize(),
+            "Esta semana": df_all["fecha"] >= week_start,
+            "Este mes":    df_all["fecha"] >= month_start,
+            "Este año":    df_all["fecha"] >= year_start,
+            "Todo":        pd.Series(True, index=df_all.index),
+        }
+        df_f    = df_all[_mask[dash_p]]
+        compras = df_f[df_f["tipo"] == "factura_compra"]
+        ventas  = df_f[df_f["tipo"].isin(["nota_venta","venta_publico"])]
 
-        # Hoy (compacto)
-        hoy_txt = f"**Hoy:** Compras ${c_hoy:,.0f}  ·  Ventas ${v_hoy:,.0f}"
-        if c_hoy == 0 and v_hoy == 0:
-            hoy_txt += "  —  sin capturas todavía"
-        st.caption(hoy_txt)
-
+        # ── Métricas del período ──────────────────────────────────────────────
+        c_tot = compras["total"].sum()
+        v_tot = ventas["total"].sum()
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("📥 Compras (mes)",    f"${c_mes:,.0f}")
-        c2.metric("📤 Ventas (mes)",     f"${v_mes:,.0f}")
-        c3.metric("📥 Compras (semana)", f"${c_sem:,.0f}")
-        c4.metric("📤 Ventas (semana)",  f"${v_sem:,.0f}")
+        c1.metric("📥 Compras",        f"${c_tot:,.0f}")
+        c2.metric("📤 Ventas",         f"${v_tot:,.0f}")
+        c3.metric("Registros compra",  len(compras))
+        c4.metric("Registros venta",   len(ventas))
 
-        # ── Alertas automáticas ───────────────────────────────────────────────────
-        c_prev = compras[(compras["fecha"] >= prev_week_start) & (compras["fecha"] < week_start)]["total"].sum()
-        v_prev = ventas[(ventas["fecha"] >= prev_week_start) & (ventas["fecha"] < week_start)]["total"].sum()
+        # ── KPI efectividad de captura (solo registros nuevos con medio rastreado) ──
+        kpi = get_capture_effectiveness()
+        if kpi["total"] > 0:
+            st.markdown("---")
+            st.markdown("#### 🎯 Efectividad de captura")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Registros rastreados",  kpi["total"])
+            k2.metric("Sin corrección manual", kpi["sin_modificacion"])
+            k3.metric("Efectividad",           f"{kpi['pct']:.0f}%")
+            if kpi["breakdown"]:
+                bd_data = [
+                    {
+                        "Medio": MEDIO_LABEL.get(m, m),
+                        "Total": v["total"],
+                        "Sin corrección": v["sin_mod"],
+                        "%": f"{v['sin_mod']/v['total']*100:.0f}%" if v["total"] else "—",
+                    }
+                    for m, v in kpi["breakdown"].items()
+                ]
+                with st.expander("Desglose por medio de captura"):
+                    st.dataframe(pd.DataFrame(bd_data), hide_index=True, use_container_width=True)
 
+        # ── Alertas semana vs semana anterior (siempre sobre datos globales) ──
+        compras_all = df_all[df_all["tipo"] == "factura_compra"]
+        ventas_all  = df_all[df_all["tipo"].isin(["nota_venta","venta_publico"])]
+        c_sem  = compras_all[compras_all["fecha"] >= week_start]["total"].sum()
+        v_sem  = ventas_all[ventas_all["fecha"] >= week_start]["total"].sum()
+        c_prev = compras_all[(compras_all["fecha"] >= prev_week_start) & (compras_all["fecha"] < week_start)]["total"].sum()
+        v_prev = ventas_all[(ventas_all["fecha"] >= prev_week_start) & (ventas_all["fecha"] < week_start)]["total"].sum()
         alerts = []
         if c_prev > 0 and c_sem > 0:
             pct_c = (c_sem - c_prev) / c_prev * 100
@@ -159,19 +208,15 @@ with tab_home:
                 alerts.append(f"🚀 Ventas esta semana **{pct_v:.0f}% más** que la semana pasada (${v_sem:,.0f} vs ${v_prev:,.0f})")
             elif pct_v < -20:
                 alerts.append(f"⚠️ Ventas esta semana **{abs(pct_v):.0f}% menores** que la semana pasada")
-
         for a in alerts:
             st.info(a)
 
-        # ── Gráfica semanal ───────────────────────────────────────────────────────
-        st.subheader("Actividad semanal")
-        df_w = df_all[df_all["fecha"].notna()].copy()
+        # ── Gráfica de actividad (del período seleccionado) ───────────────────
+        st.subheader("Actividad")
+        df_w = df_f[df_f["fecha"].notna()].copy()
         df_w["semana"] = df_w["fecha"].dt.to_period("W").dt.start_time
-        df_w["Tipo"] = df_w["tipo"].map({"factura_compra":"Compras","nota_venta":"Ventas","venta_publico":"Ventas"})
-
+        df_w["Tipo"]   = df_w["tipo"].map({"factura_compra":"Compras","nota_venta":"Ventas","venta_publico":"Ventas"})
         weekly = df_w.groupby(["semana","Tipo"])["total"].sum().reset_index()
-        weekly = weekly[weekly["semana"] >= (today - pd.Timedelta(weeks=8))]
-
         if not weekly.empty:
             fig = px.bar(
                 weekly, x="semana", y="total", color="Tipo",
@@ -184,9 +229,8 @@ with tab_home:
         else:
             st.caption("No hay datos con fecha para mostrar la gráfica.")
 
-        # ── Top proveedores y productos ───────────────────────────────────────────
+        # ── Top proveedores | Top clientes ────────────────────────────────────
         col_a, col_b = st.columns(2)
-
         with col_a:
             st.subheader("Top proveedores")
             if not compras.empty:
@@ -197,39 +241,80 @@ with tab_home:
                     .rename(columns={"entidad":"Proveedor","total":"Total ($)"})
                 )
                 if not top_prov.empty:
-                    fig2 = px.bar(
-                        top_prov.sort_values("Total ($)"),
-                        x="Total ($)", y="Proveedor", orientation="h",
-                        color_discrete_sequence=["#ef4444"],
-                    )
+                    fig2 = px.bar(top_prov.sort_values("Total ($)"), x="Total ($)", y="Proveedor",
+                                  orientation="h", color_discrete_sequence=["#ef4444"])
                     fig2.update_layout(margin=dict(t=10,b=10), showlegend=False)
                     st.plotly_chart(fig2, use_container_width=True)
                 else:
                     st.caption("Sin datos de proveedores.")
             else:
-                st.caption("Sin compras registradas.")
-
+                st.caption("Sin compras en este período.")
         with col_b:
-            st.subheader("Top productos")
-            all_p = []
-            for _, row in compras.iterrows():
+            st.subheader("Top clientes")
+            ventas_id = ventas[ventas["entidad"].notna() & (ventas["entidad"] != "")]
+            if not ventas_id.empty:
+                top_cli = (
+                    ventas_id.groupby("entidad")["total"].sum()
+                    .nlargest(5).reset_index()
+                    .rename(columns={"entidad":"Cliente","total":"Total ($)"})
+                )
+                if not top_cli.empty:
+                    fig_cli = px.bar(top_cli.sort_values("Total ($)"), x="Total ($)", y="Cliente",
+                                     orientation="h", color_discrete_sequence=["#22c55e"])
+                    fig_cli.update_layout(margin=dict(t=10,b=10), showlegend=False)
+                    st.plotly_chart(fig_cli, use_container_width=True)
+                else:
+                    st.caption("Sin clientes identificados.")
+            else:
+                st.caption("Sin ventas con cliente en este período.")
+
+        # ── Top productos: toggle monto / volumen ─────────────────────────────
+        st.markdown("---")
+        prod_metric = st.radio("📊 Ver productos por", ["💰 Monto ($)", "📦 Volumen (unidades)"],
+                               horizontal=True, key="prod_metric")
+
+        def _top_prods_fig(df_rows, color):
+            items = []
+            for _, row in df_rows.iterrows():
                 try:
                     for p in json.loads(row["productos"]):
                         if p.get("nombre"):
-                            all_p.append({"Producto": p["nombre"], "Gasto": p.get("precio_total", 0)})
+                            items.append({
+                                "Producto": p["nombre"],
+                                "Monto":    float(p.get("precio_total", 0) or 0),
+                                "Volumen":  float(p.get("cantidad", 0) or 0),
+                            })
                 except Exception:
                     pass
-            if all_p:
-                df_p = pd.DataFrame(all_p).groupby("Producto")["Gasto"].sum().nlargest(5).reset_index()
-                fig3 = px.bar(
-                    df_p.sort_values("Gasto"),
-                    x="Gasto", y="Producto", orientation="h",
-                    color_discrete_sequence=["#f97316"],
-                )
-                fig3.update_layout(margin=dict(t=10,b=10), showlegend=False)
-                st.plotly_chart(fig3, use_container_width=True)
+            if not items:
+                return None
+            df_i = pd.DataFrame(items).groupby("Producto")[["Monto","Volumen"]].sum().reset_index()
+            if prod_metric == "💰 Monto ($)":
+                df_i = df_i.nlargest(5, "Monto").sort_values("Monto")
+                return px.bar(df_i, x="Monto", y="Producto", orientation="h",
+                              color_discrete_sequence=[color], labels={"Monto":"Total ($)"})
+            else:
+                df_i = df_i.nlargest(5, "Volumen").sort_values("Volumen")
+                return px.bar(df_i, x="Volumen", y="Producto", orientation="h",
+                              color_discrete_sequence=[color], labels={"Volumen":"Cantidad"})
+
+        col_c, col_d = st.columns(2)
+        with col_c:
+            st.subheader("Productos comprados")
+            fig_pc = _top_prods_fig(compras, "#f97316")
+            if fig_pc:
+                fig_pc.update_layout(margin=dict(t=10,b=10), showlegend=False)
+                st.plotly_chart(fig_pc, use_container_width=True)
             else:
                 st.caption("Sin detalle de productos.")
+        with col_d:
+            st.subheader("Productos vendidos")
+            fig_pv = _top_prods_fig(ventas, "#3b82f6")
+            if fig_pv:
+                fig_pv.update_layout(margin=dict(t=10,b=10), showlegend=False)
+                st.plotly_chart(fig_pv, use_container_width=True)
+            else:
+                st.caption("Sin detalle de productos vendidos.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -239,31 +324,41 @@ with tab_cap:
 
     # ── REVISIÓN RÁPIDA ───────────────────────────────────────────────────────
     if "cap_draft" in st.session_state:
-        draft = st.session_state["cap_draft"]
-        tipo  = draft.get("tipo", "factura_compra")
-        total = draft.get("total") or 0
-        fecha = draft.get("fecha") or ""
+        draft   = st.session_state["cap_draft"]
+        tipo    = draft.get("tipo", "factura_compra")
+        total   = draft.get("total") or 0
+        fecha   = draft.get("fecha") or ""
         entidad = draft.get("proveedor") or draft.get("cliente") or ""
-        prods = draft.get("productos") or []
+        folio   = draft.get("folio") or ""
+        prods   = draft.get("productos") or []
 
-        # ── Vista rápida ──────────────────────────────────────────────────────
         tipo_label = {
             "factura_compra": "🛒 Compra",
             "nota_venta":     "📝 Venta",
             "venta_publico":  "🏪 Venta pública",
         }.get(tipo, "📄 Documento")
 
-        st.subheader(f"{tipo_label} · ${total:,.2f}")
+        st.subheader(f"{tipo_label} · ${float(total):,.2f}")
 
+        # Transcripción (si viene de audio)
+        if st.session_state.get("cap_transcript"):
+            with st.expander("📝 Transcripción del audio"):
+                st.write(st.session_state["cap_transcript"])
+
+        # ── Alertas de datos faltantes ────────────────────────────────────────
         if not fecha:
-            st.warning("⚠️ No se detectó fecha. Ingresa cuándo fue.")
+            st.warning("⚠️ No se detectó fecha — ingresa cuándo fue la operación.")
+        if not entidad and tipo == "factura_compra":
+            st.warning("⚠️ No se detectó proveedor.")
+        if not folio and tipo == "nota_venta":
+            st.info("ℹ️ Sin folio de nota — puedes marcarlo como pendiente abajo.")
 
-        # Campos esenciales editables (compactos)
+        # ── Campos editables ──────────────────────────────────────────────────
         col1, col2 = st.columns(2)
         with col1:
             new_tipo_lbl = st.selectbox(
                 "Tipo", list(TIPO_OPTIONS.keys()),
-                index=list(TIPO_OPTIONS.values()).index(tipo),
+                index=list(TIPO_OPTIONS.values()).index(tipo) if tipo in TIPO_OPTIONS.values() else 0,
                 key="qr_tipo",
             )
             new_tipo = TIPO_OPTIONS[new_tipo_lbl]
@@ -276,10 +371,37 @@ with tab_cap:
             )
 
         ent_label = "Proveedor" if new_tipo == "factura_compra" else "Cliente"
-        new_entidad = st.text_input(ent_label, value=entidad, key="qr_entidad")
-        new_total   = st.number_input("Total ($)", value=float(total), min_value=0.0, format="%.2f", key="qr_total")
+        col3, col4 = st.columns(2)
+        with col3:
+            new_entidad = st.text_input(ent_label, value=entidad, key="qr_entidad")
+        with col4:
+            new_total = st.number_input("Total ($)", value=float(total), min_value=0.0, format="%.2f", key="qr_total")
 
-        # Productos en vista compacta
+        # Folio / Referencia
+        col5, col6 = st.columns(2)
+        with col5:
+            if new_tipo == "venta_publico":
+                default_ref = folio if folio else next_venta_publica_ref()
+                new_folio = st.text_input("Referencia (auto)", value=default_ref, key="qr_folio",
+                                          help="Generada automáticamente: MMAA-NNN")
+            else:
+                new_folio = st.text_input("Folio", value=folio, key="qr_folio",
+                                          placeholder="Número de folio (opcional)")
+
+        # Zona (solo para ventas)
+        with col6:
+            if new_tipo in ("nota_venta", "venta_publico"):
+                new_zona = st.text_input("Zona / colonia", value=draft.get("zona",""),
+                                         key="qr_zona", placeholder="Ej: Centro, Col. Juárez")
+            else:
+                new_zona = ""
+
+        # Pendiente (nota_venta sin folio)
+        new_pendiente = False
+        if new_tipo == "nota_venta" and not new_folio.strip():
+            new_pendiente = st.checkbox("⏳ Marcar como pendiente por confirmar (sin folio)", value=True, key="qr_pendiente")
+
+        # ── Productos ─────────────────────────────────────────────────────────
         if prods:
             with st.expander(f"📦 {len(prods)} producto(s) detectados", expanded=True):
                 st.dataframe(
@@ -293,18 +415,64 @@ with tab_cap:
                     }
                 )
 
-        # Edición completa (opcional)
-        edited_prods = None
-        with st.expander("✏️ Editar productos en detalle"):
-            edited_prods = st.data_editor(
-                pd.DataFrame(_norm_prods(prods)),
-                num_rows="dynamic",
-                column_config=PROD_COLS,
-                use_container_width=True,
-                key="qr_prods_edit",
-            )
+        # ── Editor de productos con precio_total auto-calculado ──────────────────
+        _edit_key = "qr_prods_edit"
+        _base_key = "qr_prods_resolved"
+        _sig_key  = "qr_prods_sig"
 
-        # Botones
+        # Reset cuando llega un nuevo draft
+        _sig = json.dumps(prods, sort_keys=True, ensure_ascii=False)
+        if st.session_state.get(_sig_key) != _sig:
+            st.session_state[_base_key] = _norm_prods(prods)
+            st.session_state[_sig_key]  = _sig
+            st.session_state.pop(_edit_key, None)
+
+        # Leer delta acumulado del data_editor
+        _delta = st.session_state.get(_edit_key, {})
+        _base  = [dict(r) for r in st.session_state.get(_base_key, _norm_prods(prods))]
+
+        if _delta:
+            for _si, _ch in (_delta.get("edited_rows") or {}).items():
+                _i = int(_si)
+                if _i < len(_base):
+                    _base[_i].update(_ch)
+            for _di in sorted((_delta.get("deleted_rows") or []), reverse=True):
+                if _di < len(_base):
+                    _base.pop(_di)
+            for _nr in (_delta.get("added_rows") or []):
+                _base.append({"nombre":"","cantidad":0,"unidad":"","precio_unitario":0.0,"precio_total":0.0, **_nr})
+            # Recompute y persistir
+            for _r in _base:
+                _c = float(_r.get("cantidad") or 0)
+                _p = float(_r.get("precio_unitario") or 0)
+                if _c > 0 and _p > 0:
+                    _r["precio_total"] = round(_c * _p, 2)
+            st.session_state[_base_key] = [dict(r) for r in _base]
+            st.session_state.pop(_edit_key, None)
+
+        auto_subtotal = round(sum(float(r.get("precio_total") or 0) for r in _base), 2)
+
+        with st.expander("✏️ Editar productos en detalle"):
+            st.data_editor(
+                pd.DataFrame(_base),
+                num_rows="dynamic",
+                column_config={
+                    "nombre":          st.column_config.TextColumn("Producto", required=True),
+                    "cantidad":        st.column_config.NumberColumn("Cant.", format="%.3f"),
+                    "unidad":          st.column_config.TextColumn("Unidad", width="small"),
+                    "precio_unitario": st.column_config.NumberColumn("P. unit.", format="$%.2f"),
+                    "precio_total":    st.column_config.NumberColumn("Total (auto)", format="$%.2f", disabled=True),
+                    "cantidad_fisica": st.column_config.NumberColumn("Cant. física", format="%.0f"),
+                    "unidad_fisica":   st.column_config.TextColumn("U. física", width="small"),
+                },
+                use_container_width=True,
+                key=_edit_key,
+            )
+            if auto_subtotal > 0:
+                st.caption(f"📐 Total calculado: **${auto_subtotal:,.2f}**")
+        edited_prods = None  # ya no se usa en save; se lee de session_state
+
+        # ── Guardar / Descartar ───────────────────────────────────────────────
         col_s, col_d = st.columns(2)
         with col_s:
             save = st.button("✅ Guardar", type="primary", use_container_width=True)
@@ -312,22 +480,55 @@ with tab_cap:
             discard = st.button("🗑 Descartar", use_container_width=True)
 
         if discard:
-            for k in ["cap_draft","_bytes","_name","cap_transcript"]:
-                st.session_state.pop(k, None)
-            st.session_state["upload_key"] += 1
+            _clear_draft()
             st.rerun()
 
         if save:
             if not new_fecha.strip():
                 st.error("La fecha es obligatoria.")
             else:
-                prods_final = edited_prods.fillna("").to_dict("records") if edited_prods is not None else _norm_prods(prods)
+                prods_final = [dict(r) for r in st.session_state.get(_base_key, _norm_prods(prods))]
+
+                # Garantizar precio_total correcto al guardar
+                for p in prods_final:
+                    c = float(p.get("cantidad") or 0)
+                    u = float(p.get("precio_unitario") or 0)
+                    if c > 0 and u > 0:
+                        p["precio_total"] = round(c * u, 2)
+
+                # Si el total no fue tocado manualmente, usar suma de productos
+                if auto_subtotal > 0 and abs(new_total - float(draft.get("total") or 0)) < 0.01:
+                    new_total = auto_subtotal
+
+                # Detectar si hubo modificación manual
+                orig_fecha   = (draft.get("fecha") or "").strip()
+                orig_tipo    = draft.get("tipo", "factura_compra")
+                orig_entidad = (draft.get("proveedor") or draft.get("cliente") or "").strip()
+                orig_total   = float(draft.get("total") or 0)
+                orig_folio   = str(draft.get("folio") or "").strip()
+
+                def _prods_sig(ps):
+                    return sorted((p.get("nombre",""), round(float(p.get("cantidad",0)),2)) for p in ps)
+
+                sin_mod = (
+                    new_tipo == orig_tipo
+                    and new_fecha.strip() == orig_fecha
+                    and new_entidad.strip() == orig_entidad
+                    and abs(new_total - orig_total) < 0.01
+                    and new_folio.strip() == orig_folio
+                    and _prods_sig(prods_final) == _prods_sig(_norm_prods(prods))
+                )
+
                 final = {
-                    "tipo":  new_tipo,
-                    "fecha": new_fecha,
-                    "folio": draft.get("folio"),
-                    "total": new_total,
+                    "tipo":     new_tipo,
+                    "fecha":    new_fecha,
+                    "folio":    new_folio.strip() or None,
+                    "total":    new_total,
                     "productos": prods_final,
+                    "zona":     new_zona.strip(),
+                    "pendiente": new_pendiente,
+                    "sin_modificacion": sin_mod,
+                    "medio":    st.session_state.get("cap_medio", ""),
                     ("proveedor" if new_tipo == "factura_compra" else "cliente"): new_entidad,
                 }
                 dup = check_duplicate(final)
@@ -336,9 +537,7 @@ with tab_cap:
                     if not st.checkbox("Guardar de todas formas"):
                         st.stop()
                 save_document(final)
-                for k in ["cap_draft","_bytes","_name","cap_transcript","agente_analisis","agente_period"]:
-                    st.session_state.pop(k, None)
-                st.session_state["upload_key"] += 1
+                _clear_draft()
                 st.success("✅ Guardado")
                 st.rerun()
 
@@ -346,45 +545,95 @@ with tab_cap:
     else:
         key = st.session_state["upload_key"]
 
-        st.markdown("### 📷 Toma o sube una foto")
+        # ──────────────────────────────────────────────────────────────────────
+        # SECCIÓN FOTO / IMAGEN
+        # ──────────────────────────────────────────────────────────────────────
+        st.markdown("### 📷 Foto / Imagen")
         st.caption("La IA detecta automáticamente si es compra o venta y extrae todos los datos.")
 
-        # Cámara directa (funciona en móvil)
-        camera_photo = st.camera_input("Abrir cámara", key=f"cam_{key}", label_visibility="collapsed")
+        col_cam_btn, col_gal = st.columns(2)
 
-        if camera_photo:
-            with st.spinner("Procesando…"):
-                _process_and_draft(camera_photo.getvalue(), "foto.jpg")
-            st.rerun()
+        with col_cam_btn:
+            if not st.session_state["camera_open"]:
+                if st.button("📷 Abrir cámara", type="primary", use_container_width=True, key=f"btn_cam_{key}"):
+                    st.session_state["camera_open"] = True
+                    st.rerun()
+            else:
+                if st.button("✕ Cerrar cámara", use_container_width=True, key=f"close_cam_{key}"):
+                    st.session_state["camera_open"] = False
+                    st.rerun()
+
+        with col_gal:
+            up_img = st.file_uploader(
+                "📁 Subir desde galería", type=["jpg","jpeg","png","webp"],
+                key=f"img_{key}", label_visibility="collapsed",
+            )
+            if up_img:
+                if st.button("⚡ Procesar imagen", type="primary", use_container_width=True, key=f"proc_img_{key}"):
+                    with st.spinner("Procesando…"):
+                        _process_and_draft(up_img.read(), up_img.name, medio="galeria")
+                    st.rerun()
+
+        if st.session_state["camera_open"]:
+            camera_photo = st.camera_input("", key=f"cam_{key}", label_visibility="collapsed")
+            if camera_photo:
+                st.session_state["camera_open"] = False
+                with st.spinner("Procesando…"):
+                    _process_and_draft(camera_photo.getvalue(), "foto.jpg", medio="camara")
+                st.rerun()
 
         st.divider()
-        st.markdown("**Otras opciones**")
 
+        # ──────────────────────────────────────────────────────────────────────
+        # OTRAS OPCIONES
+        # ──────────────────────────────────────────────────────────────────────
+        st.markdown("**Otras opciones**")
         modo = st.radio(
-            "", ["📁 Subir imagen", "🎙️ Audio", "✏️ Texto libre", "📊 Excel / CSV"],
+            "", ["🎙️ Audio", "✏️ Texto libre", "📊 Excel / CSV"],
             horizontal=True, key=f"modo_{key}", label_visibility="collapsed",
         )
 
-        if modo == "📁 Subir imagen":
-            up = st.file_uploader("Imagen", type=["jpg","jpeg","png","webp"], key=f"img_{key}", label_visibility="collapsed")
-            if up and st.button("⚡ Procesar imagen", type="primary"):
-                with st.spinner("Procesando…"):
-                    _process_and_draft(up.read(), up.name)
-                st.rerun()
+        # ── AUDIO ─────────────────────────────────────────────────────────────
+        if modo == "🎙️ Audio":
+            st.caption("Graba directamente en el navegador o sube un archivo de audio.")
+            st.caption("⏱️ Mínimo 3 segundos para que la transcripción funcione bien.")
 
-        elif modo == "🎙️ Audio":
-            st.caption("Graba una nota de voz en tu celular y súbela.")
-            aud = st.file_uploader("Audio", type=["mp3","m4a","wav","ogg","webm"], key=f"aud_{key}", label_visibility="collapsed")
-            if aud and st.button("⚡ Procesar audio", type="primary"):
-                with st.spinner("Transcribiendo…"):
-                    transcript, data = extract_from_audio_auto(aud.read(), aud.name)
-                    st.session_state["cap_draft"] = data
-                    st.session_state["cap_transcript"] = transcript
-                st.rerun()
-            if st.session_state.get("cap_transcript"):
-                with st.expander("📝 Transcripción"):
-                    st.write(st.session_state["cap_transcript"])
+            audio_tab_rec, audio_tab_file = st.tabs(["🎙 Grabar ahora", "📁 Subir archivo"])
 
+            with audio_tab_rec:
+                recorded = st.audio_input("Grabar nota de voz", label_visibility="collapsed",
+                                          key=f"rec_{key}")
+                if recorded:
+                    if st.button("⚡ Procesar grabación", type="primary",
+                                 use_container_width=True, key=f"proc_rec_{key}"):
+                        with st.spinner("Transcribiendo…"):
+                            transcript, data = extract_from_audio_auto(recorded.read(), "grabacion.wav")
+                        if len(transcript.strip()) < 5:
+                            st.warning("⚠️ Grabación muy corta o sin voz detectada. "
+                                       "Graba al menos 3 segundos hablando claramente.")
+                        else:
+                            st.session_state["cap_draft"] = data
+                            st.session_state["cap_transcript"] = transcript
+                            st.session_state["cap_medio"] = "audio_grabacion"
+                            st.rerun()
+
+            with audio_tab_file:
+                aud = st.file_uploader("Audio", type=["mp3","m4a","wav","ogg","webm"],
+                                       key=f"aud_{key}", label_visibility="collapsed")
+                if aud:
+                    if st.button("⚡ Procesar audio", type="primary",
+                                 use_container_width=True, key=f"proc_aud_{key}"):
+                        with st.spinner("Transcribiendo…"):
+                            transcript, data = extract_from_audio_auto(aud.read(), aud.name)
+                        if len(transcript.strip()) < 5:
+                            st.warning("⚠️ Audio muy corto o sin voz detectada. Verifica el archivo.")
+                        else:
+                            st.session_state["cap_draft"] = data
+                            st.session_state["cap_transcript"] = transcript
+                            st.session_state["cap_medio"] = "audio_archivo"
+                            st.rerun()
+
+        # ── TEXTO LIBRE ───────────────────────────────────────────────────────
         elif modo == "✏️ Texto libre":
             txt = st.text_area(
                 "Descripción", height=120, key=f"txt_{key}", label_visibility="collapsed",
@@ -392,9 +641,12 @@ with tab_cap:
             )
             if txt.strip() and st.button("⚡ Procesar texto", type="primary"):
                 with st.spinner("Extrayendo…"):
-                    st.session_state["cap_draft"] = extract_from_text_auto(txt)
+                    data = extract_from_text_auto(txt)
+                    st.session_state["cap_draft"] = data
+                    st.session_state["cap_medio"] = "texto"
                 st.rerun()
 
+        # ── EXCEL / CSV ───────────────────────────────────────────────────────
         elif modo == "📊 Excel / CSV":
             tipo_xl = st.radio(
                 "Contenido", ["Solo compras","Solo ventas","Mezcla (auto-detectar)"],
@@ -410,6 +662,8 @@ with tab_cap:
                         if check_duplicate(d):
                             skipped += 1
                         else:
+                            d["medio"] = "excel"
+                            d["sin_modificacion"] = True
                             save_document(d)
                             saved += 1
                 st.success(f"✅ {saved} registros importados" + (f" · {skipped} omitidos por duplicado" if skipped else ""))
@@ -449,19 +703,33 @@ with tab_reg:
                     st.session_state.pop("confirm_del", None)
                     st.rerun()
 
-        # Búsqueda rápida
-        search = st.text_input("🔍 Buscar proveedor / cliente", key="reg_search", label_visibility="collapsed",
+        search = st.text_input("🔍 Buscar proveedor / cliente", key="reg_search",
+                               label_visibility="collapsed",
                                placeholder="🔍 Buscar proveedor / cliente…")
 
-        df = pd.DataFrame(rows, columns=["ID","tipo","Fecha captura","Fecha doc","Proveedor/Cliente","Folio","Total","Productos"])
-        df["Tipo"] = df["tipo"].map(TIPO_LABEL).fillna("Otro")
+        df = pd.DataFrame(rows, columns=["ID","tipo","Fecha captura","Fecha doc",
+                                          "Proveedor/Cliente","Folio","Total","Productos",
+                                          "Zona","Pendiente","Sin_mod","Medio"])
+        df["Tipo"]  = df["tipo"].map(TIPO_LABEL).fillna("Otro")
         df["Total"] = df["Total"].apply(lambda x: f"${x:,.2f}")
+
+        def _get_alert(r):
+            a = []
+            if r["tipo"] == "nota_venta" and not str(r["Folio"]).strip():
+                a.append("Sin folio")
+            if not str(r["Fecha doc"]).strip():
+                a.append("Sin fecha")
+            if r["Pendiente"]:
+                a.append("⏳ Pendiente")
+            return " · ".join(a) if a else "✓"
+
+        df["Alertas"] = df.apply(_get_alert, axis=1)
 
         if search:
             df = df[df["Proveedor/Cliente"].str.contains(search, case=False, na=False)]
 
         st.dataframe(
-            df[["Tipo","Fecha doc","Fecha captura","Proveedor/Cliente","Folio","Total"]],
+            df[["Tipo","Fecha doc","Proveedor/Cliente","Folio","Zona","Total","Alertas","Medio"]],
             use_container_width=True, hide_index=True,
         )
 
@@ -469,6 +737,9 @@ with tab_reg:
             sel = st.selectbox("ID", [r[0] for r in rows], format_func=lambda x: f"ID {x}")
             row = next((r for r in rows if r[0] == sel), None)
             if row:
+                st.caption(f"Capturado: {row[2]}  ·  Medio: {MEDIO_LABEL.get(row[11], row[11] or '—')}")
+                if row[9]:
+                    st.warning("⏳ Pendiente por confirmar")
                 prods = json.loads(row[7])
                 if prods:
                     st.dataframe(pd.DataFrame(_norm_prods(prods)), use_container_width=True, hide_index=True)
@@ -483,7 +754,6 @@ with tab_agent:
     if not all_rows:
         st.info("Captura documentos para que el agente pueda analizar tu negocio.")
     else:
-        # ── Filtro de período ─────────────────────────────────────────────────
         col_p, col_btn = st.columns([3,1])
         with col_p:
             periodo = st.selectbox(
@@ -521,7 +791,6 @@ with tab_agent:
         filtered = get_filtered_documents(start_str, end_str)
         context  = build_context(filtered)
 
-        # Invalidar caché si cambió período
         period_key = periodo + str(start_str) + str(end_str)
         if st.session_state.get("agente_period") != period_key:
             st.session_state.pop("agente_analisis", None)
@@ -532,10 +801,10 @@ with tab_agent:
         if not filtered:
             st.info("No hay registros para este período.")
         else:
-            # ── Mini-gráficas del período ─────────────────────────────────────
-            df_f = _parse_df_dates(
-                pd.DataFrame(filtered, columns=["id","tipo","fecha_cap","fecha_doc","entidad","folio","total","productos"])
-            )
+            _cols = ["id","tipo","fecha_cap","fecha_doc","entidad","folio","total","productos",
+                     "zona","pendiente","sin_modificacion","medio"]
+            df_f = _parse_df_dates(pd.DataFrame(filtered, columns=_cols))
+
             c_tot = df_f[df_f["tipo"]=="factura_compra"]["total"].sum()
             v_tot = df_f[df_f["tipo"].isin(["nota_venta","venta_publico"])]["total"].sum()
 
@@ -557,14 +826,12 @@ with tab_agent:
                     fig_ag.update_layout(margin=dict(t=10,b=10), legend_title_text="")
                     st.plotly_chart(fig_ag, use_container_width=True)
 
-            # ── Análisis IA ───────────────────────────────────────────────────
             st.subheader("🤖 Diagnóstico")
             if "agente_analisis" not in st.session_state:
                 with st.spinner("Analizando…"):
                     st.session_state["agente_analisis"] = analyze_business(context, period_label)
             st.markdown(st.session_state["agente_analisis"])
 
-            # ── Chat ──────────────────────────────────────────────────────────
             st.divider()
             st.subheader("💬 Pregunta")
             st.caption("Ej: ¿Cuánto gasté en tomate? · ¿Cuál es mi margen? · ¿Qué debería hacer esta semana?")

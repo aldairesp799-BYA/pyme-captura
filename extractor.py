@@ -19,12 +19,23 @@ TEXT_MODEL = "llama-3.3-70b-versatile"
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 AUDIO_MODEL = "whisper-large-v3"
 
-_PROD = '{"nombre":"...","cantidad":0,"unidad":"pz/kg/lt/caja/etc","precio_unitario":0.0,"precio_total":0.0}'
+_PROD = '{"nombre":"...","cantidad":0,"unidad":"kg/pz/lt/caja/etc","precio_unitario":0.0,"precio_total":0.0,"cantidad_fisica":null,"unidad_fisica":null}'
+
+_UNIT_RULES = """REGLAS DE UNIDADES (obligatorio):
+1. Toneladas → kg: si la cantidad está en toneladas, multiplica ×1000 y usa unidad='kg'.
+2. Doble unidad (cuando se menciona TANTO cantidad física como peso):
+   - cantidad = los KILOGRAMOS (es lo que determina el precio)
+   - unidad = 'kg'
+   - cantidad_fisica = número de bobinas / atados / rollos / piezas físicas
+   - unidad_fisica = 'bobina' / 'atado' / 'rollo' / 'pz'
+   - precio_total = cantidad(kg) × precio_unitario  ← NUNCA con cantidad_fisica
+3. Productos solo-pieza (varilla, armex, tabique, cemento bolsa, clavo): unidad='pz' o 'saco', cantidad_fisica=null.
+4. precio_total = cantidad × precio_unitario SIEMPRE."""
 
 _SCHEMA = {
-    "factura_compra": f'{{"tipo":"factura_compra","proveedor":"nombre o null","fecha":"DD/MM/YYYY o null","folio":"número o null","productos":[{_PROD}],"total":0.0}}',
-    "nota_venta":     f'{{"tipo":"nota_venta","cliente":"nombre o null","fecha":"DD/MM/YYYY o null","folio":"número o null","productos":[{_PROD}],"total":0.0}}',
-    "venta_publico":  f'{{"tipo":"venta_publico","fecha":"DD/MM/YYYY o null","folio":null,"productos":[{_PROD}],"total":0.0}}',
+    "factura_compra": f'{{"tipo":"factura_compra","proveedor":"nombre o null","fecha":"DD/MM/YYYY real del documento (puede ser de meses/años anteriores — usa la fecha del documento, NO la de hoy) o null","folio":"número o null","productos":[{_PROD}],"total":0.0}}',
+    "nota_venta":     f'{{"tipo":"nota_venta","cliente":"nombre o null","zona":"colonia/domicilio/zona del cliente si aparece, sino null","fecha":"DD/MM/YYYY real del documento (puede ser de meses/años anteriores — usa la fecha del documento, NO la de hoy) o null","folio":"número o null","productos":[{_PROD}],"total":0.0}}',
+    "venta_publico":  f'{{"tipo":"venta_publico","zona":"colonia/domicilio/zona del cliente si aparece, sino null","fecha":"DD/MM/YYYY real del documento (puede ser de meses/años anteriores — usa la fecha del documento, NO la de hoy) o null","folio":null,"productos":[{_PROD}],"total":0.0}}',
 }
 
 _MIME = {
@@ -38,15 +49,16 @@ _LABEL = {
     "venta_publico":  "venta al público (sin nota formal)",
 }
 
-_AUTO_SCHEMA = """{
+_AUTO_SCHEMA = f"""{{
   "tipo": "factura_compra | nota_venta | venta_publico",
   "proveedor": "si es compra, sino null",
   "cliente": "si es venta con cliente identificable, sino null",
-  "fecha": "DD/MM/YYYY si aparece en el documento, sino null",
+  "zona": "colonia, domicilio o zona del cliente si aparece en el documento, sino null",
+  "fecha": "DD/MM/YYYY EXACTAMENTE como aparece en el documento — puede ser de semanas, meses o años anteriores, usa la fecha REAL del documento, NO la de hoy. null si no aparece.",
   "folio": "número de folio o null",
-  "productos": [{"nombre":"...","cantidad":0,"unidad":"pz/kg/lt/caja/etc","precio_unitario":0.0,"precio_total":0.0}],
+  "productos": [{_PROD}],
   "total": 0.0
-}"""
+}}"""
 
 
 def _strip_json(content: str) -> str:
@@ -163,7 +175,7 @@ def extract_from_image_auto(image_bytes: bytes) -> dict:
         messages=[{
             "role": "user",
             "content": [
-                {"type": "text", "text": f"Eres experto en documentos de PyMEs mexicanas. Determina si este documento es una compra (factura_compra), venta con cliente (nota_venta) o venta sin cliente (venta_publico). Extrae TODOS los campos incluyendo unidad de medida. Responde SOLO JSON válido:\n{_AUTO_SCHEMA}"},
+                {"type": "text", "text": f"Eres experto en documentos de PyMEs mexicanas. Determina si este documento es una compra (factura_compra), venta con cliente (nota_venta) o venta sin cliente (venta_publico). Extrae TODOS los campos incluyendo zona/domicilio del cliente.\n\n{_UNIT_RULES}\n\nResponde SOLO JSON válido:\n{_AUTO_SCHEMA}"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ],
         }],
@@ -177,8 +189,8 @@ def extract_from_text_auto(text: str) -> dict:
     """Extrae de texto libre auto-detectando tipo de documento."""
     resp = _get_client().chat.completions.create(
         model=TEXT_MODEL,
-        messages=[{"role": "user", "content": f'Extrae datos de esta descripción de operación de una PyME mexicana. Determina si es compra o venta. El texto puede ser coloquial:\n"{text}"\n\nResponde SOLO JSON válido:\n{_AUTO_SCHEMA}'}],
-        max_tokens=1000,
+        messages=[{"role": "user", "content": f'Eres experto en operaciones de PyMEs mexicanas. Determina si es compra o venta. El texto puede ser coloquial o dictado por voz.\n\n{_UNIT_RULES}\n\nTexto:\n"{text}"\n\nResponde SOLO JSON válido:\n{_AUTO_SCHEMA}'}],
+        max_tokens=1200,
         temperature=0,
     )
     return json.loads(_strip_json(resp.choices[0].message.content))
