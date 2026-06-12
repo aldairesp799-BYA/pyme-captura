@@ -211,24 +211,74 @@ def extract_from_audio_auto(audio_bytes: bytes, filename: str) -> tuple:
     return transcript, data
 
 
+def normalize_product_names(products: list, known_products: list) -> list:
+    """Normaliza nombres extraídos contra el catálogo histórico del negocio."""
+    if len(known_products) < 3 or not products:
+        return products
+    extracted = [p.get("nombre", "") for p in products if p.get("nombre")]
+    if not extracted:
+        return products
+    catalog = "\n".join(f"- {p}" for p in known_products[:60])
+    resp = _get_client().chat.completions.create(
+        model=TEXT_MODEL,
+        messages=[{"role": "user", "content": f"""Eres experto en ferretería y materiales de construcción mexicanos.
+
+Catálogo de productos del negocio:
+{catalog}
+
+Nombres recién extraídos (pueden ser variantes, abreviaciones o sinónimos):
+{json.dumps(extracted, ensure_ascii=False)}
+
+Para cada nombre extraído: si hay coincidencia clara con el catálogo (mismo producto escrito diferente), usa el nombre del catálogo. Si no hay coincidencia, deja el original.
+
+Responde SOLO JSON array en el mismo orden que los nombres extraídos:
+["nombre_1", "nombre_2", ...]"""}],
+        max_tokens=300,
+        temperature=0,
+    )
+    try:
+        normalized = json.loads(_strip_json(resp.choices[0].message.content))
+        j = 0
+        for p in products:
+            if p.get("nombre"):
+                if j < len(normalized) and normalized[j]:
+                    p["nombre"] = normalized[j]
+                j += 1
+    except Exception:
+        pass
+    return products
+
+
 def analyze_business(context: str, period_label: str = "histórico completo") -> str:
     resp = _get_client().chat.completions.create(
         model=TEXT_MODEL,
-        messages=[{"role": "user", "content": f"""Eres consultor de PyMEs mexicanas especializado en "consultoría inversa".
+        messages=[{"role": "user", "content": f"""Eres consultor operativo de una PyME mexicana (ferretería/materiales de construcción).
 
-IMPORTANTE: Cada registro tiene una fecha de documento (cuando ocurrió la operación real) y una fecha de captura (cuando se subió al sistema). Usa SIEMPRE la fecha del documento para el análisis temporal, nunca la fecha de captura.
+USA siempre la fecha del DOCUMENTO para análisis temporal, nunca la fecha de captura.
 
-Período analizado: {period_label}
+Período: {period_label}
 
-Datos del negocio:
+Datos:
 {context}
 
-## 📊 Resumen Financiero
-## 🔴 Alertas (máximo 3)
-## 💡 Top 5 Recomendaciones (basadas en datos reales de este negocio)
-## 📈 Oportunidades Detectadas
+## 📊 Resumen del período
+(ventas, compras, margen global)
 
-Lenguaje simple, directo, sin jerga técnica."""}],
+## 📦 Productos y movimientos
+- Cuáles se mueven más (volumen y dinero)
+- Productos vendidos sin compra registrada (riesgo de abasto)
+- Margen por producto donde haya datos de compra y venta
+- Precio de compra vs precio de venta
+
+## 👥 Clientes
+- Más frecuentes / mayor valor
+- Zonas con más actividad
+
+## 🔴 Alertas (máximo 3)
+
+## 💡 Recomendaciones (máximo 5, basadas en datos reales)
+
+Lenguaje directo. Omite secciones sin datos."""}],
         max_tokens=2000,
         temperature=0.3,
     )

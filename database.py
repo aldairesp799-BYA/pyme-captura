@@ -152,35 +152,126 @@ def build_context(rows: list) -> str:
     ventas  = [r for r in rows if r[1] in ("nota_venta", "venta_publico")]
     lines   = []
 
-    if compras:
-        lines.append(f"COMPRAS ({len(compras)} registros):")
-        for r in compras:
-            prods = json.loads(r[7])
-            ps = ", ".join(
-                f"{p.get('nombre','')}×{p.get('cantidad',0)}{' '+p.get('unidad','') if p.get('unidad') else ''}"
-                for p in prods if p.get("nombre")
+    def _ps(r):
+        try:
+            return ", ".join(
+                f"{p['nombre']} {p.get('cantidad',0)}{p.get('unidad','')}"
+                for p in json.loads(r[7] or "[]") if p.get("nombre")
             ) or "sin detalle"
-            lines.append(f"  {r[3] or '?'} | {r[4] or 'sin proveedor'} | {ps} | ${r[6]:,.2f}")
+        except Exception:
+            return "sin detalle"
+
+    if compras:
+        lines.append(f"COMPRAS ({len(compras)} transacciones, ${sum(r[6] for r in compras):,.2f}):")
+        for r in compras:
+            lines.append(f"  {r[3] or '?'} | {r[4] or 'sin proveedor'} | {_ps(r)} | ${r[6]:,.2f}")
 
     if ventas:
-        lines.append(f"\nVENTAS ({len(ventas)} registros):")
+        lines.append(f"\nVENTAS ({len(ventas)} transacciones, ${sum(r[6] for r in ventas):,.2f}):")
         for r in ventas:
-            prods = json.loads(r[7])
-            ps = ", ".join(
-                f"{p.get('nombre','')}×{p.get('cantidad',0)}{' '+p.get('unidad','') if p.get('unidad') else ''}"
-                for p in prods if p.get("nombre")
-            ) or "sin detalle"
-            entidad  = r[4] or ("público general" if r[1] == "venta_publico" else "sin cliente")
-            zona_txt = f" [{r[8]}]" if r[8] else ""
-            lines.append(f"  {r[3] or '?'} | {entidad}{zona_txt} | {ps} | ${r[6]:,.2f}")
+            entidad = r[4] or ("público general" if r[1] == "venta_publico" else "sin cliente")
+            zona    = f" [{r[8]}]" if r[8] else ""
+            lines.append(f"  {r[3] or '?'} | {entidad}{zona} | {_ps(r)} | ${r[6]:,.2f}")
+
+    # ── Movimiento por producto ───────────────────────────────────────────────
+    pc, pv = {}, {}
+    for r in compras:
+        for p in json.loads(r[7] or "[]"):
+            n = (p.get("nombre") or "").strip()
+            if not n:
+                continue
+            e = pc.setdefault(n, {"cant": 0.0, "precios": []})
+            e["cant"] += float(p.get("cantidad") or 0)
+            if p.get("precio_unitario"):
+                e["precios"].append(float(p["precio_unitario"]))
+    for r in ventas:
+        for p in json.loads(r[7] or "[]"):
+            n = (p.get("nombre") or "").strip()
+            if not n:
+                continue
+            e = pv.setdefault(n, {"cant": 0.0, "precios": [], "clientes": set()})
+            e["cant"] += float(p.get("cantidad") or 0)
+            if p.get("precio_unitario"):
+                e["precios"].append(float(p["precio_unitario"]))
+            if r[4]:
+                e["clientes"].add(r[4])
+
+    all_prods = sorted(set(pc) | set(pv))
+    if all_prods:
+        lines.append("\nMOVIMIENTO POR PRODUCTO:")
+        for n in all_prods:
+            c  = pc.get(n, {})
+            v  = pv.get(n, {})
+            cp = sum(c.get("precios", [])) / len(c["precios"]) if c.get("precios") else 0
+            vp = sum(v.get("precios", [])) / len(v["precios"]) if v.get("precios") else 0
+            mg = f" | margen {((vp-cp)/cp*100):+.0f}%" if cp > 0 and vp > 0 else ""
+            al = " ⚠️SIN_COMPRA" if not c and v else (" (sin ventas)" if c and not v else "")
+            cli = f" | {len(v.get('clientes', set()))} cliente(s)" if v.get("clientes") else ""
+            lines.append(
+                f"  {n}: comprado {c.get('cant',0):.1f} | vendido {v.get('cant',0):.1f}"
+                f"{(' | P.c $'+f'{cp:.2f}') if cp else ''}"
+                f"{(' | P.v $'+f'{vp:.2f}') if vp else ''}"
+                f"{mg}{cli}{al}"
+            )
+
+    # ── Clientes ──────────────────────────────────────────────────────────────
+    clis = {}
+    for r in ventas:
+        if r[4]:
+            e = clis.setdefault(r[4], {"visitas": 0, "total": 0.0, "zona": r[8] or ""})
+            e["visitas"] += 1
+            e["total"]   += r[6]
+    if clis:
+        lines.append("\nCLIENTES:")
+        for cli, d in sorted(clis.items(), key=lambda x: -x[1]["total"])[:10]:
+            zona = f" [{d['zona']}]" if d["zona"] else ""
+            lines.append(f"  {cli}{zona}: {d['visitas']} compra(s), ${d['total']:,.2f}")
 
     total_c = sum(r[6] for r in compras)
     total_v = sum(r[6] for r in ventas)
     lines.append(f"\nTOTAL COMPRAS: ${total_c:,.2f} | TOTAL VENTAS: ${total_v:,.2f}")
     if total_c > 0 and total_v > 0:
-        lines.append(f"MARGEN ESTIMADO: {((total_v - total_c) / total_v * 100):.1f}%")
+        lines.append(f"MARGEN GLOBAL: {((total_v - total_c) / total_v * 100):.1f}%")
 
     return "\n".join(lines)
+
+
+def update_document(doc_id: int, data: dict):
+    entidad = data.get("proveedor") or data.get("cliente") or ""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """UPDATE documentos
+               SET tipo=?, fecha_documento=?, entidad=?, folio=?, total=?,
+                   productos=?, zona=?, pendiente=?
+               WHERE id=?""",
+            (
+                data.get("tipo", ""),
+                data.get("fecha", ""),
+                entidad,
+                data.get("folio", "") or "",
+                data.get("total") or 0.0,
+                json.dumps(data.get("productos", []), ensure_ascii=False),
+                data.get("zona", "") or "",
+                1 if data.get("pendiente") else 0,
+                doc_id,
+            ),
+        )
+
+
+def get_known_products() -> list[str]:
+    """Devuelve nombres únicos de productos del historial (para normalización)."""
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT productos FROM documentos WHERE productos != '[]'").fetchall()
+    seen: dict[str, str] = {}
+    for (pj,) in rows:
+        try:
+            for p in json.loads(pj or "[]"):
+                n = (p.get("nombre") or "").strip()
+                if n:
+                    seen[n.lower()] = n
+        except Exception:
+            pass
+    return list(seen.values())
 
 
 def get_products_summary() -> list:

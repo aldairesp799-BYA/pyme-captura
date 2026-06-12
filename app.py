@@ -23,12 +23,14 @@ from database import (
     TIPO_LABEL, build_context, check_duplicate, delete_all,
     export_csv, get_all_as_df, get_all_documents,
     get_capture_effectiveness, get_filtered_documents,
-    init_db, next_venta_publica_ref, save_document,
+    get_known_products, init_db, next_venta_publica_ref,
+    save_document, update_document,
 )
 from extractor import (
     analyze_business, chat_with_agent,
     extract_from_audio_auto, extract_from_excel,
     extract_from_image_auto, extract_from_text_auto,
+    normalize_product_names,
 )
 
 st.set_page_config(page_title="Verstockia", page_icon="📦", layout="centered")
@@ -105,8 +107,17 @@ def _parse_df_dates(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalize(data: dict) -> dict:
+    prods = data.get("productos") or []
+    if prods:
+        known = get_known_products()
+        if len(known) >= 3:
+            data["productos"] = normalize_product_names(prods, known)
+    return data
+
+
 def _process_and_draft(raw_bytes: bytes, filename: str = "imagen.jpg", medio: str = "galeria"):
-    data = extract_from_image_auto(raw_bytes)
+    data = _normalize(extract_from_image_auto(raw_bytes))
     st.session_state["cap_draft"] = data
     st.session_state["cap_medio"] = medio
     st.session_state.pop("cap_mode", None)
@@ -612,7 +623,7 @@ with tab_cap:
                             st.warning("⚠️ Grabación muy corta o sin voz detectada. "
                                        "Graba al menos 3 segundos hablando claramente.")
                         else:
-                            st.session_state["cap_draft"] = data
+                            st.session_state["cap_draft"] = _normalize(data)
                             st.session_state["cap_transcript"] = transcript
                             st.session_state["cap_medio"] = "audio_grabacion"
                             st.rerun()
@@ -628,7 +639,7 @@ with tab_cap:
                         if len(transcript.strip()) < 5:
                             st.warning("⚠️ Audio muy corto o sin voz detectada. Verifica el archivo.")
                         else:
-                            st.session_state["cap_draft"] = data
+                            st.session_state["cap_draft"] = _normalize(data)
                             st.session_state["cap_transcript"] = transcript
                             st.session_state["cap_medio"] = "audio_archivo"
                             st.rerun()
@@ -641,7 +652,7 @@ with tab_cap:
             )
             if txt.strip() and st.button("⚡ Procesar texto", type="primary"):
                 with st.spinner("Extrayendo…"):
-                    data = extract_from_text_auto(txt)
+                    data = _normalize(extract_from_text_auto(txt))
                     st.session_state["cap_draft"] = data
                     st.session_state["cap_medio"] = "texto"
                 st.rerun()
@@ -733,16 +744,125 @@ with tab_reg:
             use_container_width=True, hide_index=True,
         )
 
-        with st.expander("🔍 Ver detalle"):
+        with st.expander("🔍 Ver / Editar registro"):
             sel = st.selectbox("ID", [r[0] for r in rows], format_func=lambda x: f"ID {x}")
             row = next((r for r in rows if r[0] == sel), None)
             if row:
                 st.caption(f"Capturado: {row[2]}  ·  Medio: {MEDIO_LABEL.get(row[11], row[11] or '—')}")
                 if row[9]:
                     st.warning("⏳ Pendiente por confirmar")
-                prods = json.loads(row[7])
-                if prods:
+                prods = json.loads(row[7] or "[]")
+                if prods and not st.session_state.get("reg_edit_id") == sel:
                     st.dataframe(pd.DataFrame(_norm_prods(prods)), use_container_width=True, hide_index=True)
+
+                col_ebtn, _ = st.columns([1, 3])
+                with col_ebtn:
+                    if st.session_state.get("reg_edit_id") != sel:
+                        if st.button("✏️ Editar", key=f"edit_open_{sel}"):
+                            st.session_state["reg_edit_id"] = sel
+                            for k in ["re_prods_edit","re_prods_resolved","re_prods_sig"]:
+                                st.session_state.pop(k, None)
+                            st.rerun()
+                    else:
+                        if st.button("✕ Cancelar edición", key=f"edit_close_{sel}"):
+                            st.session_state.pop("reg_edit_id", None)
+                            st.rerun()
+
+                if st.session_state.get("reg_edit_id") == sel:
+                    st.markdown("---")
+                    r_tipo    = row[1]
+                    r_fecha   = row[3] or ""
+                    r_entidad = row[4] or ""
+                    r_folio   = row[5] or ""
+                    r_total   = float(row[6] or 0)
+                    r_zona    = row[8] or ""
+                    r_pend    = bool(row[9])
+                    r_prods   = json.loads(row[7] or "[]")
+
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        e_tipo_lbl = st.selectbox("Tipo", list(TIPO_OPTIONS.keys()),
+                            index=list(TIPO_OPTIONS.values()).index(r_tipo) if r_tipo in TIPO_OPTIONS.values() else 0,
+                            key="re_tipo")
+                        e_tipo = TIPO_OPTIONS[e_tipo_lbl]
+                    with ec2:
+                        e_fecha = st.text_input("Fecha del documento *", value=r_fecha, key="re_fecha")
+
+                    ec3, ec4 = st.columns(2)
+                    ent_lbl = "Proveedor" if e_tipo == "factura_compra" else "Cliente"
+                    with ec3:
+                        e_entidad = st.text_input(ent_lbl, value=r_entidad, key="re_entidad")
+                    with ec4:
+                        e_total = st.number_input("Total ($)", value=r_total, min_value=0.0, format="%.2f", key="re_total")
+
+                    ec5, ec6 = st.columns(2)
+                    with ec5:
+                        e_folio = st.text_input("Folio", value=r_folio, key="re_folio")
+                    with ec6:
+                        if e_tipo in ("nota_venta", "venta_publico"):
+                            e_zona = st.text_input("Zona / colonia", value=r_zona, key="re_zona")
+                        else:
+                            e_zona = ""
+                    if e_tipo == "nota_venta" and not e_folio.strip():
+                        e_pend = st.checkbox("⏳ Pendiente por confirmar", value=r_pend, key="re_pend")
+                    else:
+                        e_pend = False
+
+                    # Productos con auto-cálculo (misma lógica, claves re_*)
+                    _rek = "re_prods_edit"; _rbk = "re_prods_resolved"; _rsk = "re_prods_sig"
+                    _rsig = json.dumps(r_prods, sort_keys=True, ensure_ascii=False)
+                    if st.session_state.get(_rsk) != _rsig:
+                        st.session_state[_rbk] = _norm_prods(r_prods)
+                        st.session_state[_rsk]  = _rsig
+                        st.session_state.pop(_rek, None)
+                    _rdelta = st.session_state.get(_rek, {})
+                    _rbase  = [dict(r) for r in st.session_state.get(_rbk, _norm_prods(r_prods))]
+                    if _rdelta:
+                        for _si, _ch in (_rdelta.get("edited_rows") or {}).items():
+                            _i = int(_si)
+                            if _i < len(_rbase): _rbase[_i].update(_ch)
+                        for _di in sorted((_rdelta.get("deleted_rows") or []), reverse=True):
+                            if _di < len(_rbase): _rbase.pop(_di)
+                        for _nr in (_rdelta.get("added_rows") or []):
+                            _rbase.append({"nombre":"","cantidad":0,"unidad":"","precio_unitario":0.0,"precio_total":0.0,**_nr})
+                        for _r in _rbase:
+                            _c = float(_r.get("cantidad") or 0); _p = float(_r.get("precio_unitario") or 0)
+                            if _c > 0 and _p > 0: _r["precio_total"] = round(_c * _p, 2)
+                        st.session_state[_rbk] = [dict(r) for r in _rbase]
+                        st.session_state.pop(_rek, None)
+                    re_auto_total = round(sum(float(r.get("precio_total") or 0) for r in _rbase), 2)
+                    with st.expander("✏️ Productos", expanded=True):
+                        st.data_editor(pd.DataFrame(_rbase), num_rows="dynamic",
+                            column_config={
+                                "nombre": st.column_config.TextColumn("Producto"),
+                                "cantidad": st.column_config.NumberColumn("Cant.", format="%.3f"),
+                                "unidad": st.column_config.TextColumn("Unidad", width="small"),
+                                "precio_unitario": st.column_config.NumberColumn("P. unit.", format="$%.2f"),
+                                "precio_total": st.column_config.NumberColumn("Total (auto)", format="$%.2f", disabled=True),
+                            }, use_container_width=True, key=_rek)
+                        if re_auto_total > 0:
+                            st.caption(f"📐 Total calculado: **${re_auto_total:,.2f}**")
+
+                    if st.button("💾 Guardar cambios", type="primary", key=f"edit_save_{sel}"):
+                        if not e_fecha.strip():
+                            st.error("La fecha es obligatoria.")
+                        else:
+                            ef_prods = [dict(r) for r in st.session_state.get(_rbk, _norm_prods(r_prods))]
+                            for p in ef_prods:
+                                c = float(p.get("cantidad") or 0); u = float(p.get("precio_unitario") or 0)
+                                if c > 0 and u > 0: p["precio_total"] = round(c * u, 2)
+                            e_total_f = re_auto_total if re_auto_total > 0 and abs(e_total - r_total) < 0.01 else e_total
+                            update_document(sel, {
+                                "tipo": e_tipo, "fecha": e_fecha,
+                                ("proveedor" if e_tipo == "factura_compra" else "cliente"): e_entidad,
+                                "folio": e_folio.strip() or None,
+                                "total": e_total_f, "productos": ef_prods,
+                                "zona": e_zona.strip(), "pendiente": e_pend,
+                            })
+                            st.session_state.pop("reg_edit_id", None)
+                            for k in [_rek, _rbk, _rsk]: st.session_state.pop(k, None)
+                            st.success("✅ Registro actualizado")
+                            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
