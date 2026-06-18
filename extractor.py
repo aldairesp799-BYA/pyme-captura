@@ -2,8 +2,9 @@ import base64
 import io
 import json
 import os
+import re
 
-from groq import Groq
+from groq import Groq, RateLimitError
 from PIL import Image
 import pandas as pd
 
@@ -14,6 +15,16 @@ def _get_client() -> Groq:
     if _client is None:
         _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     return _client
+
+
+def _llm(**kwargs):
+    """Wrapper centralizado para chat completions — convierte RateLimitError en mensaje legible."""
+    try:
+        return _get_client().chat.completions.create(**kwargs)
+    except RateLimitError as e:
+        m = re.search(r"try again in ([^\.']+)", str(e))
+        wait = m.group(1).strip() if m else "unos minutos"
+        raise RuntimeError(f"Límite de tokens de Groq alcanzado. Intenta de nuevo en {wait}.") from e
 
 TEXT_MODEL = "llama-3.3-70b-versatile"
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -79,7 +90,7 @@ def extract_from_image(image_file, document_type: str) -> dict:
     b64 = base64.b64encode(buf.getvalue()).decode()
 
     label = _LABEL[document_type]
-    resp = _get_client().chat.completions.create(
+    resp = _llm(
         model=VISION_MODEL,
         messages=[{
             "role": "user",
@@ -96,7 +107,7 @@ def extract_from_image(image_file, document_type: str) -> dict:
 
 def extract_from_text(text: str, document_type: str) -> dict:
     label = _LABEL[document_type]
-    resp = _get_client().chat.completions.create(
+    resp = _llm(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": f'Extrae datos de esta descripción de {label} mexicana. Infiere la unidad de medida si no se menciona explícitamente. El texto puede ser coloquial o tener errores:\n"{text}"\n\nResponde SOLO JSON válido:\n{_SCHEMA[document_type]}'}],
         max_tokens=1000,
@@ -152,7 +163,7 @@ Datos:
 
 Responde SOLO un array JSON: [{_SCHEMA[document_type]}, ...]"""
 
-    resp = _get_client().chat.completions.create(
+    resp = _llm(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=4000,
@@ -170,7 +181,7 @@ def extract_from_image_auto(image_bytes: bytes) -> dict:
     img.save(buf, format="JPEG", quality=90)
     b64 = base64.b64encode(buf.getvalue()).decode()
 
-    resp = _get_client().chat.completions.create(
+    resp = _llm(
         model=VISION_MODEL,
         messages=[{
             "role": "user",
@@ -185,15 +196,79 @@ def extract_from_image_auto(image_bytes: bytes) -> dict:
     return json.loads(_strip_json(resp.choices[0].message.content))
 
 
+_EMPTY_DOC = {
+    "tipo": "factura_compra", "proveedor": None, "cliente": None,
+    "zona": None, "fecha": None, "folio": None, "productos": [], "total": 0.0,
+}
+
+_CAT_SCHEMAS = {
+    "cliente":    '{"nombre": "nombre canónico del cliente", "alias": ["como también se le conoce, puede estar vacío"], "zona": "zona, colonia o domicilio, null si no se menciona"}',
+    "proveedor":  '{"nombre": "nombre canónico del proveedor", "alias": ["variantes del nombre, puede estar vacío"], "notas": "información relevante o cadena vacía"}',
+    "producto":   '{"nombre": "nombre canónico del producto", "variantes": ["otras formas de llamarlo, ej: varilla 3/8, varilla tres octavos"], "unidad": "unidad principal: kg/pz/atado/rollo/etc", "notas": "info adicional o cadena vacía"}',
+}
+
+_CAT_EMPTY = {
+    "cliente":   {"nombre": "", "alias": [], "zona": ""},
+    "proveedor": {"nombre": "", "alias": [], "notas": ""},
+    "producto":  {"nombre": "", "variantes": [], "unidad": "", "notas": ""},
+}
+
+
+def extract_catalogo_entry(text: str, tipo: str) -> dict:
+    """Extrae datos de una entidad de catálogo (cliente/proveedor/producto) desde texto libre o dictado."""
+    schema = _CAT_SCHEMAS.get(tipo, _CAT_SCHEMAS["cliente"])
+    prompt = (
+        f'Extrae la información de este {tipo} desde el texto. '
+        f'El texto puede ser coloquial o dictado por voz en español mexicano.\n\n'
+        f'Texto: "{text}"\n\nResponde SOLO JSON válido con este schema:\n{schema}'
+    )
+    resp = _llm(
+        model=TEXT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=400,
+        temperature=0,
+    )
+    raw = _strip_json(resp.choices[0].message.content)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    try:
+        fix = _llm(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": f'Corrige este JSON malformado y devuelve SOLO el JSON corregido:\n\n{raw}'}],
+            max_tokens=400,
+            temperature=0,
+        )
+        return json.loads(_strip_json(fix.choices[0].message.content))
+    except Exception:
+        return dict(_CAT_EMPTY.get(tipo, {}))
+
+
 def extract_from_text_auto(text: str) -> dict:
     """Extrae de texto libre auto-detectando tipo de documento."""
-    resp = _get_client().chat.completions.create(
+    resp = _llm(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": f'Eres experto en operaciones de PyMEs mexicanas. Determina si es compra o venta. El texto puede ser coloquial o dictado por voz.\n\n{_UNIT_RULES}\n\nTexto:\n"{text}"\n\nResponde SOLO JSON válido:\n{_AUTO_SCHEMA}'}],
         max_tokens=1200,
         temperature=0,
     )
-    return json.loads(_strip_json(resp.choices[0].message.content))
+    raw = _strip_json(resp.choices[0].message.content)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        fix_resp = _llm(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": f'El siguiente texto debe ser JSON válido pero está malformado. Corrígelo y devuelve SOLO el JSON corregido, sin explicaciones:\n\n{raw}'}],
+            max_tokens=1200,
+            temperature=0,
+        )
+        return json.loads(_strip_json(fix_resp.choices[0].message.content))
+    except Exception:
+        return dict(_EMPTY_DOC)
 
 
 def extract_from_audio_auto(audio_bytes: bytes, filename: str) -> tuple:
@@ -219,7 +294,7 @@ def normalize_product_names(products: list, known_products: list) -> list:
     if not extracted:
         return products
     catalog = "\n".join(f"- {p}" for p in known_products[:60])
-    resp = _get_client().chat.completions.create(
+    resp = _llm(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": f"""Eres experto en ferretería y materiales de construcción mexicanos.
 
@@ -250,7 +325,7 @@ Responde SOLO JSON array en el mismo orden que los nombres extraídos:
 
 
 def analyze_business(context: str, period_label: str = "histórico completo") -> str:
-    resp = _get_client().chat.completions.create(
+    resp = _llm(
         model=TEXT_MODEL,
         messages=[{"role": "user", "content": f"""Eres consultor operativo de una PyME mexicana (ferretería/materiales de construcción).
 
@@ -293,7 +368,7 @@ def chat_with_agent(context: str, history: list, question: str) -> str:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": question})
 
-    resp = _get_client().chat.completions.create(
+    resp = _llm(
         model=TEXT_MODEL,
         messages=messages,
         max_tokens=500,

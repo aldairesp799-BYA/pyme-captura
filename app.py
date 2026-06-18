@@ -25,9 +25,13 @@ from database import (
     get_capture_effectiveness, get_filtered_documents,
     get_known_products, init_db, next_venta_publica_ref,
     save_document, update_document,
+    get_catalogo_clientes, upsert_cliente, delete_cliente, find_cliente,
+    get_catalogo_proveedores, upsert_proveedor, delete_proveedor,
+    get_catalogo_productos, upsert_producto, delete_producto,
 )
 from extractor import (
     analyze_business, chat_with_agent,
+    extract_catalogo_entry,
     extract_from_audio_auto, extract_from_excel,
     extract_from_image_auto, extract_from_text_auto,
     normalize_product_names,
@@ -107,6 +111,15 @@ def _parse_df_dates(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _groq(fn, *args, **kwargs):
+    """Llama a una función del extractor y muestra mensaje amigable si Groq está limitado."""
+    try:
+        return fn(*args, **kwargs)
+    except RuntimeError as e:
+        st.error(f"⏳ {e}")
+        st.stop()
+
+
 def _normalize(data: dict) -> dict:
     prods = data.get("productos") or []
     if prods:
@@ -117,7 +130,7 @@ def _normalize(data: dict) -> dict:
 
 
 def _process_and_draft(raw_bytes: bytes, filename: str = "imagen.jpg", medio: str = "galeria"):
-    data = _normalize(extract_from_image_auto(raw_bytes))
+    data = _normalize(_groq(extract_from_image_auto, raw_bytes))
     st.session_state["cap_draft"] = data
     st.session_state["cap_medio"] = medio
     st.session_state.pop("cap_mode", None)
@@ -134,7 +147,7 @@ def _clear_draft():
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
 st.title("📦 Verstockia")
-tab_cap, tab_home, tab_reg, tab_agent = st.tabs(["📸 Capturar", "📊 Inicio", "📋 Registros", "🤖 Agente IA"])
+tab_cat, tab_cap, tab_home, tab_reg, tab_agent = st.tabs(["📚 Catálogo", "📸 Capturar", "📊 Inicio", "📋 Registros", "🤖 Agente IA"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -399,10 +412,15 @@ with tab_cap:
                 new_folio = st.text_input("Folio", value=folio, key="qr_folio",
                                           placeholder="Número de folio (opcional)")
 
-        # Zona (solo para ventas)
+        # Zona (solo para ventas) — auto-rellena desde catálogo si el cliente ya existe
         with col6:
             if new_tipo in ("nota_venta", "venta_publico"):
-                new_zona = st.text_input("Zona / colonia", value=draft.get("zona",""),
+                _zona_draft = draft.get("zona", "") or ""
+                if not _zona_draft and new_entidad.strip():
+                    _cat_cli = find_cliente(new_entidad.strip())
+                    if _cat_cli and _cat_cli.get("zona"):
+                        _zona_draft = _cat_cli["zona"]
+                new_zona = st.text_input("Zona / colonia", value=_zona_draft,
                                          key="qr_zona", placeholder="Ej: Centro, Col. Juárez")
             else:
                 new_zona = ""
@@ -507,16 +525,17 @@ with tab_cap:
                     if c > 0 and u > 0:
                         p["precio_total"] = round(c * u, 2)
 
-                # Si el total no fue tocado manualmente, usar suma de productos
-                if auto_subtotal > 0 and abs(new_total - float(draft.get("total") or 0)) < 0.01:
-                    new_total = auto_subtotal
-
-                # Detectar si hubo modificación manual
+                # Detectar si el usuario tocó el campo total manualmente
                 orig_fecha   = (draft.get("fecha") or "").strip()
                 orig_tipo    = draft.get("tipo", "factura_compra")
                 orig_entidad = (draft.get("proveedor") or draft.get("cliente") or "").strip()
                 orig_total   = float(draft.get("total") or 0)
                 orig_folio   = str(draft.get("folio") or "").strip()
+                user_touched_total = abs(new_total - orig_total) >= 0.01
+
+                # Si el usuario no tocó el total, usar suma de productos (auto-corrección sin penalizar KPI)
+                if auto_subtotal > 0 and not user_touched_total:
+                    new_total = auto_subtotal
 
                 def _prods_sig(ps):
                     return sorted((p.get("nombre",""), round(float(p.get("cantidad",0)),2)) for p in ps)
@@ -525,7 +544,7 @@ with tab_cap:
                     new_tipo == orig_tipo
                     and new_fecha.strip() == orig_fecha
                     and new_entidad.strip() == orig_entidad
-                    and abs(new_total - orig_total) < 0.01
+                    and not user_touched_total
                     and new_folio.strip() == orig_folio
                     and _prods_sig(prods_final) == _prods_sig(_norm_prods(prods))
                 )
@@ -618,7 +637,7 @@ with tab_cap:
                     if st.button("⚡ Procesar grabación", type="primary",
                                  use_container_width=True, key=f"proc_rec_{key}"):
                         with st.spinner("Transcribiendo…"):
-                            transcript, data = extract_from_audio_auto(recorded.read(), "grabacion.wav")
+                            transcript, data = _groq(extract_from_audio_auto, recorded.read(), "grabacion.wav")
                         if len(transcript.strip()) < 5:
                             st.warning("⚠️ Grabación muy corta o sin voz detectada. "
                                        "Graba al menos 3 segundos hablando claramente.")
@@ -635,7 +654,7 @@ with tab_cap:
                     if st.button("⚡ Procesar audio", type="primary",
                                  use_container_width=True, key=f"proc_aud_{key}"):
                         with st.spinner("Transcribiendo…"):
-                            transcript, data = extract_from_audio_auto(aud.read(), aud.name)
+                            transcript, data = _groq(extract_from_audio_auto, aud.read(), aud.name)
                         if len(transcript.strip()) < 5:
                             st.warning("⚠️ Audio muy corto o sin voz detectada. Verifica el archivo.")
                         else:
@@ -652,7 +671,7 @@ with tab_cap:
             )
             if txt.strip() and st.button("⚡ Procesar texto", type="primary"):
                 with st.spinner("Extrayendo…"):
-                    data = _normalize(extract_from_text_auto(txt))
+                    data = _normalize(_groq(extract_from_text_auto, txt))
                     st.session_state["cap_draft"] = data
                     st.session_state["cap_medio"] = "texto"
                 st.rerun()
@@ -949,7 +968,7 @@ with tab_agent:
             st.subheader("🤖 Diagnóstico")
             if "agente_analisis" not in st.session_state:
                 with st.spinner("Analizando…"):
-                    st.session_state["agente_analisis"] = analyze_business(context, period_label)
+                    st.session_state["agente_analisis"] = _groq(analyze_business, context, period_label)
             st.markdown(st.session_state["agente_analisis"])
 
             st.divider()
@@ -969,6 +988,128 @@ with tab_agent:
                     st.write(prompt)
                 with st.chat_message("assistant"):
                     with st.spinner("…"):
-                        reply = chat_with_agent(context, st.session_state["chat_history"][:-1], prompt)
+                        reply = _groq(chat_with_agent, context, st.session_state["chat_history"][:-1], prompt)
                     st.write(reply)
                 st.session_state["chat_history"].append({"role":"assistant","content":reply})
+
+# ── TAB CATÁLOGO ──────────────────────────────────────────────────────────────
+
+def _cat_render_section(tipo: str, get_fn, upsert_fn, delete_fn,
+                        row_fn, field_keys: list[str]):
+    """Renderiza una sección del catálogo: entrada por voz/texto + tabla + borrar."""
+    key_draft  = f"cat_{tipo}_draft"
+    key_audio  = f"cat_{tipo}_audio"
+
+    # ── Entrada por voz o texto ───────────────────────────────────────────────
+    inp_audio, inp_texto = st.tabs(["🎙 Voz", "⌨️ Texto"])
+
+    with inp_audio:
+        audio_val = st.audio_input("Graba lo que quieras registrar", key=key_audio)
+        if audio_val and st.button("⚡ Procesar audio", key=f"cat_{tipo}_proc_audio", type="primary"):
+            with st.spinner("Transcribiendo…"):
+                transcript, _ = _groq(extract_from_audio_auto, audio_val.read(), "audio.ogg")
+            with st.spinner("Extrayendo datos…"):
+                st.session_state[key_draft] = _groq(extract_catalogo_entry, transcript, tipo)
+            st.rerun()
+
+    with inp_texto:
+        hint = {
+            "cliente":   "Ej: mi cliente Juan García, vive en el Centro, también lo conozco como Juanito",
+            "proveedor": "Ej: proveedor Aceros del Norte, también les digo Aceros",
+            "producto":  "Ej: varilla de 3/8, también la llamo varilla tres octavos, se vende por kg",
+        }.get(tipo, "")
+        txt_val = st.text_area("Describe el registro", placeholder=hint, key=f"cat_{tipo}_txt", height=80)
+        if txt_val.strip() and st.button("⚡ Procesar texto", key=f"cat_{tipo}_proc_txt", type="primary"):
+            with st.spinner("Extrayendo datos…"):
+                st.session_state[key_draft] = _groq(extract_catalogo_entry, txt_val.strip(), tipo)
+            st.rerun()
+
+    # ── Preview editable ──────────────────────────────────────────────────────
+    if key_draft in st.session_state:
+        draft = st.session_state[key_draft]
+        st.markdown("**Revisar antes de guardar:**")
+        edited = {}
+        for fk in field_keys:
+            val = draft.get(fk, "")
+            if isinstance(val, list):
+                edited[fk] = [v.strip() for v in
+                               st.text_input(fk.capitalize(), value=", ".join(val),
+                                             key=f"cat_{tipo}_f_{fk}").split(",") if v.strip()]
+            else:
+                edited[fk] = st.text_input(fk.capitalize(), value=str(val or ""),
+                                            key=f"cat_{tipo}_f_{fk}")
+
+        sv, cl = st.columns(2)
+        if sv.button("✅ Guardar", key=f"cat_{tipo}_save", type="primary"):
+            if edited.get("nombre", "").strip():
+                upsert_fn(**{k: v for k, v in edited.items()})
+                del st.session_state[key_draft]
+                st.success("Guardado.")
+                st.rerun()
+            else:
+                st.error("El nombre es obligatorio.")
+        if cl.button("🗑 Descartar", key=f"cat_{tipo}_discard"):
+            del st.session_state[key_draft]
+            st.rerun()
+
+    # ── Tabla actual ──────────────────────────────────────────────────────────
+    registros = get_fn()
+    if registros:
+        st.markdown("---")
+        display_rows = []
+        for i, r in enumerate(registros, 1):
+            row = row_fn(r)
+            row.pop("ID", None)
+            display_rows.append({"#": i, **row})
+        st.dataframe(pd.DataFrame(display_rows), hide_index=True, use_container_width=True)
+        nombres = [r["nombre"] for r in registros]
+        sel = st.selectbox("Eliminar registro", ["— ninguno —"] + nombres,
+                           key=f"cat_{tipo}_del_sel")
+        if sel != "— ninguno —" and st.button("🗑 Eliminar", key=f"cat_{tipo}_del_btn"):
+            del_id = next(r["id"] for r in registros if r["nombre"] == sel)
+            delete_fn(del_id)
+            st.success(f"'{sel}' eliminado.")
+            st.rerun()
+    else:
+        st.info("Sin registros aún.")
+
+
+with tab_cat:
+    st.subheader("📚 Catálogo del negocio")
+    st.caption("Habla o escribe para registrar — la IA extrae los datos automáticamente.")
+
+    cat_cli, cat_prov, cat_prod = st.tabs(["👥 Clientes", "🏭 Proveedores", "📦 Productos"])
+
+    with cat_cli:
+        _cat_render_section(
+            tipo="cliente",
+            get_fn=get_catalogo_clientes,
+            upsert_fn=lambda nombre, alias, zona: upsert_cliente(nombre, alias, zona),
+            delete_fn=delete_cliente,
+            row_fn=lambda c: {"ID": c["id"], "Nombre": c["nombre"],
+                               "Alias": ", ".join(c["alias"]), "Zona": c["zona"]},
+            field_keys=["nombre", "alias", "zona"],
+        )
+
+    with cat_prov:
+        _cat_render_section(
+            tipo="proveedor",
+            get_fn=get_catalogo_proveedores,
+            upsert_fn=lambda nombre, alias, notas: upsert_proveedor(nombre, alias, notas),
+            delete_fn=delete_proveedor,
+            row_fn=lambda p: {"ID": p["id"], "Nombre": p["nombre"],
+                               "Alias": ", ".join(p["alias"]), "Notas": p["notas"]},
+            field_keys=["nombre", "alias", "notas"],
+        )
+
+    with cat_prod:
+        _cat_render_section(
+            tipo="producto",
+            get_fn=get_catalogo_productos,
+            upsert_fn=lambda nombre, variantes, unidad, notas: upsert_producto(nombre, variantes, unidad, notas),
+            delete_fn=delete_producto,
+            row_fn=lambda p: {"ID": p["id"], "Nombre": p["nombre"],
+                               "Variantes": ", ".join(p["variantes"]),
+                               "Unidad": p["unidad"], "Notas": p["notas"]},
+            field_keys=["nombre", "variantes", "unidad", "notas"],
+        )

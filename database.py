@@ -35,7 +35,6 @@ def init_db():
                 medio            TEXT DEFAULT ''
             )
         """)
-        # Migration: add new columns to existing tables without failing
         for col, definition in [
             ("zona",             "TEXT DEFAULT ''"),
             ("pendiente",        "INTEGER DEFAULT 0"),
@@ -46,6 +45,32 @@ def init_db():
                 conn.execute(f"ALTER TABLE documentos ADD COLUMN {col} {definition}")
             except Exception:
                 pass
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS catalogo_clientes (
+                id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL,
+                alias  TEXT DEFAULT '[]',
+                zona   TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS catalogo_proveedores (
+                id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL,
+                alias  TEXT DEFAULT '[]',
+                notas  TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS catalogo_productos (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre    TEXT NOT NULL,
+                variantes TEXT DEFAULT '[]',
+                unidad    TEXT DEFAULT '',
+                notas     TEXT DEFAULT ''
+            )
+        """)
 
 
 def next_venta_publica_ref() -> str:
@@ -323,6 +348,135 @@ def get_capture_effectiveness() -> dict:
         "pct": (sin_mod / total * 100) if total > 0 else 0,
         "breakdown": breakdown,
     }
+
+
+# ── Catálogo: helpers internos ────────────────────────────────────────────────
+
+def _alias_match(nombre: str, registro_nombre: str, registro_alias: str) -> bool:
+    """True si `nombre` coincide con el nombre o algún alias (case-insensitive, sin espacios extra)."""
+    q = nombre.strip().lower()
+    if q == registro_nombre.strip().lower():
+        return True
+    try:
+        for a in json.loads(registro_alias or "[]"):
+            if q == a.strip().lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# ── Catálogo: clientes ─────────────────────────────────────────────────────────
+
+def get_catalogo_clientes() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, nombre, alias, zona FROM catalogo_clientes ORDER BY nombre"
+        ).fetchall()
+    return [{"id": r[0], "nombre": r[1], "alias": json.loads(r[2] or "[]"), "zona": r[3]} for r in rows]
+
+
+def upsert_cliente(nombre: str, alias: list | None = None, zona: str = "", cliente_id: int | None = None):
+    alias_json = json.dumps(alias or [], ensure_ascii=False)
+    with sqlite3.connect(DB_PATH) as conn:
+        if cliente_id:
+            conn.execute(
+                "UPDATE catalogo_clientes SET nombre=?, alias=?, zona=? WHERE id=?",
+                (nombre.strip(), alias_json, zona.strip(), cliente_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO catalogo_clientes (nombre, alias, zona) VALUES (?, ?, ?)",
+                (nombre.strip(), alias_json, zona.strip()),
+            )
+
+
+def delete_cliente(cliente_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM catalogo_clientes WHERE id=?", (cliente_id,))
+
+
+def find_cliente(nombre: str) -> dict | None:
+    """Busca un cliente por nombre o alias. Retorna el registro o None."""
+    for c in get_catalogo_clientes():
+        if _alias_match(nombre, c["nombre"], json.dumps(c["alias"])):
+            return c
+    return None
+
+
+# ── Catálogo: proveedores ──────────────────────────────────────────────────────
+
+def get_catalogo_proveedores() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, nombre, alias, notas FROM catalogo_proveedores ORDER BY nombre"
+        ).fetchall()
+    return [{"id": r[0], "nombre": r[1], "alias": json.loads(r[2] or "[]"), "notas": r[3]} for r in rows]
+
+
+def upsert_proveedor(nombre: str, alias: list | None = None, notas: str = "", proveedor_id: int | None = None):
+    alias_json = json.dumps(alias or [], ensure_ascii=False)
+    with sqlite3.connect(DB_PATH) as conn:
+        if proveedor_id:
+            conn.execute(
+                "UPDATE catalogo_proveedores SET nombre=?, alias=?, notas=? WHERE id=?",
+                (nombre.strip(), alias_json, notas.strip(), proveedor_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO catalogo_proveedores (nombre, alias, notas) VALUES (?, ?, ?)",
+                (nombre.strip(), alias_json, notas.strip()),
+            )
+
+
+def delete_proveedor(proveedor_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM catalogo_proveedores WHERE id=?", (proveedor_id,))
+
+
+def find_proveedor(nombre: str) -> dict | None:
+    for p in get_catalogo_proveedores():
+        if _alias_match(nombre, p["nombre"], json.dumps(p["alias"])):
+            return p
+    return None
+
+
+# ── Catálogo: productos ────────────────────────────────────────────────────────
+
+def get_catalogo_productos() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, nombre, variantes, unidad, notas FROM catalogo_productos ORDER BY nombre"
+        ).fetchall()
+    return [{"id": r[0], "nombre": r[1], "variantes": json.loads(r[2] or "[]"), "unidad": r[3], "notas": r[4]} for r in rows]
+
+
+def upsert_producto(nombre: str, variantes: list | None = None, unidad: str = "", notas: str = "", producto_id: int | None = None):
+    variantes_json = json.dumps(variantes or [], ensure_ascii=False)
+    with sqlite3.connect(DB_PATH) as conn:
+        if producto_id:
+            conn.execute(
+                "UPDATE catalogo_productos SET nombre=?, variantes=?, unidad=?, notas=? WHERE id=?",
+                (nombre.strip(), variantes_json, unidad.strip(), notas.strip(), producto_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO catalogo_productos (nombre, variantes, unidad, notas) VALUES (?, ?, ?, ?)",
+                (nombre.strip(), variantes_json, unidad.strip(), notas.strip()),
+            )
+
+
+def delete_producto(producto_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM catalogo_productos WHERE id=?", (producto_id,))
+
+
+def find_producto_canonico(nombre: str) -> str | None:
+    """Retorna el nombre canónico si encuentra match por variante. None si no hay match."""
+    for p in get_catalogo_productos():
+        if _alias_match(nombre, p["nombre"], json.dumps(p["variantes"])):
+            return p["nombre"]
+    return None
 
 
 def delete_all():
