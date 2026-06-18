@@ -26,9 +26,10 @@ def _llm(**kwargs):
         wait = m.group(1).strip() if m else "unos minutos"
         raise RuntimeError(f"Límite de tokens de Groq alcanzado. Intenta de nuevo en {wait}.") from e
 
-TEXT_MODEL = "llama-3.3-70b-versatile"
+TEXT_MODEL   = "llama-3.3-70b-versatile"
+FAST_MODEL   = "llama-3.1-8b-instant"
 VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-AUDIO_MODEL = "whisper-large-v3"
+AUDIO_MODEL  = "whisper-large-v3"
 
 _PROD = '{"nombre":"...","cantidad":0,"unidad":"kg/pz/lt/caja/etc","precio_unitario":0.0,"precio_total":0.0,"cantidad_fisica":null,"unidad_fisica":null}'
 
@@ -223,7 +224,7 @@ def extract_catalogo_entry(text: str, tipo: str) -> dict:
         f'Texto: "{text}"\n\nResponde SOLO JSON válido con este schema:\n{schema}'
     )
     resp = _llm(
-        model=TEXT_MODEL,
+        model=FAST_MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=400,
         temperature=0,
@@ -235,7 +236,7 @@ def extract_catalogo_entry(text: str, tipo: str) -> dict:
         pass
     try:
         fix = _llm(
-            model=TEXT_MODEL,
+            model=FAST_MODEL,
             messages=[{"role": "user", "content": f'Corrige este JSON malformado y devuelve SOLO el JSON corregido:\n\n{raw}'}],
             max_tokens=400,
             temperature=0,
@@ -261,7 +262,7 @@ def extract_from_text_auto(text: str) -> dict:
 
     try:
         fix_resp = _llm(
-            model=TEXT_MODEL,
+            model=FAST_MODEL,
             messages=[{"role": "user", "content": f'El siguiente texto debe ser JSON válido pero está malformado. Corrígelo y devuelve SOLO el JSON corregido, sin explicaciones:\n\n{raw}'}],
             max_tokens=1200,
             temperature=0,
@@ -295,7 +296,7 @@ def normalize_product_names(products: list, known_products: list) -> list:
         return products
     catalog = "\n".join(f"- {p}" for p in known_products[:60])
     resp = _llm(
-        model=TEXT_MODEL,
+        model=FAST_MODEL,
         messages=[{"role": "user", "content": f"""Eres experto en ferretería y materiales de construcción mexicanos.
 
 Catálogo de productos del negocio:
