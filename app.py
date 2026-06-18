@@ -28,6 +28,7 @@ from database import (
     get_catalogo_clientes, upsert_cliente, delete_cliente, find_cliente,
     get_catalogo_proveedores, upsert_proveedor, delete_proveedor, find_proveedor,
     get_catalogo_productos, upsert_producto, delete_producto, find_producto_canonico,
+    learn_alias,
 )
 from extractor import (
     analyze_business, chat_with_agent,
@@ -582,6 +583,20 @@ with tab_cap:
                     if not st.checkbox("Guardar de todas formas"):
                         st.stop()
                 save_document(final)
+
+                # Aprender de correcciones: si el usuario cambió entidad o producto,
+                # añadir la variante original como alias en el catálogo automáticamente
+                if new_entidad.strip() and orig_entidad and new_entidad.strip().lower() != orig_entidad.lower():
+                    campo = "proveedor" if new_tipo == "factura_compra" else "cliente"
+                    learn_alias(orig_entidad, new_entidad.strip(), campo)
+                orig_prods = _norm_prods(prods)
+                if len(prods_final) == len(orig_prods):
+                    for p_o, p_f in zip(orig_prods, prods_final):
+                        n_o = (p_o.get("nombre") or "").strip()
+                        n_f = (p_f.get("nombre") or "").strip()
+                        if n_o and n_f and n_o.lower() != n_f.lower():
+                            learn_alias(n_o, n_f, "producto")
+
                 _clear_draft()
                 st.success("✅ Guardado")
                 st.rerun()

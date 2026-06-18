@@ -479,6 +479,33 @@ def find_producto_canonico(nombre: str) -> str | None:
     return None
 
 
+def learn_alias(original: str, corrected: str, tipo: str):
+    """Si `corrected` existe en el catálogo y difiere de `original`, añade `original` como alias."""
+    orig = original.strip()
+    corr = corrected.strip()
+    if not orig or not corr or orig.lower() == corr.lower():
+        return
+    if tipo == "proveedor":
+        entry = find_proveedor(corr)
+        if entry and entry["nombre"].strip().lower() == corr.lower():
+            aliases = list(entry.get("alias") or [])
+            if orig.lower() not in [a.lower() for a in aliases]:
+                upsert_proveedor(entry["nombre"], aliases + [orig], entry.get("notas", ""), entry["id"])
+    elif tipo == "cliente":
+        entry = find_cliente(corr)
+        if entry and entry["nombre"].strip().lower() == corr.lower():
+            aliases = list(entry.get("alias") or [])
+            if orig.lower() not in [a.lower() for a in aliases]:
+                upsert_cliente(entry["nombre"], aliases + [orig], entry.get("zona", ""), entry["id"])
+    elif tipo == "producto":
+        for p in get_catalogo_productos():
+            if p["nombre"].strip().lower() == corr.lower():
+                variantes = list(p.get("variantes") or [])
+                if orig.lower() not in [v.lower() for v in variantes]:
+                    upsert_producto(p["nombre"], variantes + [orig], p.get("unidad", ""), p.get("notas", ""), p["id"])
+                break
+
+
 def delete_all():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM documentos")
