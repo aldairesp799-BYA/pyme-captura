@@ -506,6 +506,78 @@ def learn_alias(original: str, corrected: str, tipo: str):
                 break
 
 
+def get_kpi_frecuencia_uso(ventana: int = 30) -> dict:
+    """Días únicos con registro en los últimos N días y brecha máxima histórica."""
+    from datetime import timedelta, date as date_type
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT fecha_captura FROM documentos").fetchall()
+
+    today = date_type.today()
+    cutoff = today - timedelta(days=ventana)
+    dias_ventana: set = set()
+    todos: list = []
+    for (fc,) in rows:
+        try:
+            d = datetime.strptime(fc, "%d/%m/%Y %H:%M").date()
+            todos.append(d)
+            if d >= cutoff:
+                dias_ventana.add(d)
+        except Exception:
+            pass
+
+    brecha = 0
+    if todos:
+        ordenados = sorted(set(todos))
+        for i in range(1, len(ordenados)):
+            gap = (ordenados[i] - ordenados[i - 1]).days - 1
+            if gap > brecha:
+                brecha = gap
+        gap_final = (today - ordenados[-1]).days
+        if gap_final > brecha:
+            brecha = gap_final
+
+    return {
+        "dias_activos": len(dias_ventana),
+        "ventana": ventana,
+        "ultimo_registro": todos and max(todos).strftime("%d/%m/%Y"),
+        "brecha_max_dias": brecha,
+        "dias": sorted(dias_ventana),
+    }
+
+
+def get_kpi_completitud_campos() -> dict:
+    """% de registros con fecha_documento, entidad y total completos."""
+    with sqlite3.connect(DB_PATH) as conn:
+        total      = conn.execute("SELECT COUNT(*) FROM documentos").fetchone()[0]
+        con_fecha  = conn.execute(
+            "SELECT COUNT(*) FROM documentos WHERE fecha_documento != '' AND fecha_documento IS NOT NULL"
+        ).fetchone()[0]
+        con_entidad = conn.execute(
+            "SELECT COUNT(*) FROM documentos WHERE entidad != '' AND entidad IS NOT NULL"
+        ).fetchone()[0]
+        con_total  = conn.execute(
+            "SELECT COUNT(*) FROM documentos WHERE total > 0"
+        ).fetchone()[0]
+    if total == 0:
+        return {"total": 0, "pct_fecha": 0.0, "pct_entidad": 0.0, "pct_total": 0.0,
+                "con_fecha": 0, "con_entidad": 0, "con_total": 0}
+    return {
+        "total": total,
+        "con_fecha": con_fecha,   "pct_fecha":   con_fecha   / total * 100,
+        "con_entidad": con_entidad, "pct_entidad": con_entidad / total * 100,
+        "con_total": con_total,   "pct_total":   con_total   / total * 100,
+    }
+
+
+def get_kpi_uso_por_canal() -> dict:
+    """Conteo de registros por canal de captura (campo medio)."""
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(NULLIF(medio,''), 'sin_medio'), COUNT(*) FROM documentos GROUP BY medio ORDER BY 2 DESC"
+        ).fetchall()
+    return {m: c for m, c in rows}
+
+
 def delete_all():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM documentos")

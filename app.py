@@ -29,6 +29,7 @@ from database import (
     get_catalogo_proveedores, upsert_proveedor, delete_proveedor, find_proveedor,
     get_catalogo_productos, upsert_producto, delete_producto, find_producto_canonico,
     learn_alias,
+    get_kpi_frecuencia_uso, get_kpi_completitud_campos, get_kpi_uso_por_canal,
 )
 from extractor import (
     analyze_business, chat_with_agent,
@@ -40,6 +41,15 @@ from extractor import (
 
 st.set_page_config(page_title="Verstockia", page_icon="📦", layout="centered")
 init_db()
+
+# ── Acceso panel fundador ──────────────────────────────────────────────────────
+with st.sidebar:
+    with st.expander("🔑", expanded=False):
+        _clave = st.text_input("Clave", type="password", label_visibility="collapsed", key="_clave_input")
+        if _clave == "pyme2026":
+            st.session_state["_admin"] = True
+        elif _clave and _clave != "pyme2026":
+            st.session_state["_admin"] = False
 
 st.markdown("""
 <style>
@@ -163,7 +173,14 @@ def _clear_draft():
 
 # ── TABS ──────────────────────────────────────────────────────────────────────
 st.title("📦 Verstockia")
-tab_cat, tab_cap, tab_home, tab_reg, tab_agent = st.tabs(["📚 Catálogo", "📸 Capturar", "📊 Inicio", "📋 Registros", "🤖 Agente IA"])
+_admin = st.session_state.get("_admin", False)
+_tab_names = ["📚 Catálogo", "📸 Capturar", "📊 Inicio", "📋 Registros", "🤖 Agente IA"]
+if _admin:
+    _tab_names.append("📈 Análisis")
+    tab_cat, tab_cap, tab_home, tab_reg, tab_agent, tab_analisis = st.tabs(_tab_names)
+else:
+    tab_cat, tab_cap, tab_home, tab_reg, tab_agent = st.tabs(_tab_names)
+    tab_analisis = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1143,3 +1160,88 @@ with tab_cat:
                                "Unidad": p["unidad"], "Notas": p["notas"]},
             field_keys=["nombre", "variantes", "unidad", "notas"],
         )
+
+
+# ── TAB ANÁLISIS (fundador) ────────────────────────────────────────────────────
+if tab_analisis:
+    with tab_analisis:
+        st.subheader("📈 Panel de análisis")
+        st.caption("Vista exclusiva — métricas de uso y calidad del sistema.")
+
+        # ── KPI 1: efectividad de captura (ya existente) ──────────────────────
+        kpi_ef = get_capture_effectiveness()
+        st.markdown("#### 🎯 Efectividad de captura IA")
+        if kpi_ef["total"] == 0:
+            st.info("Sin registros rastreados aún.")
+        else:
+            a1, a2, a3 = st.columns(3)
+            a1.metric("Registros rastreados",  kpi_ef["total"])
+            a2.metric("Sin corrección manual", kpi_ef["sin_modificacion"])
+            a3.metric("% sin corrección",      f"{kpi_ef['pct']:.0f}%")
+            if kpi_ef["breakdown"]:
+                bd = [{"Canal": MEDIO_LABEL.get(m, m), "Total": v["total"],
+                       "Sin corrección": v["sin_mod"],
+                       "%": f"{v['sin_mod']/v['total']*100:.0f}%" if v["total"] else "—"}
+                      for m, v in kpi_ef["breakdown"].items()]
+                st.dataframe(pd.DataFrame(bd), hide_index=True, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── KPI 2: frecuencia de uso ──────────────────────────────────────────
+        kpi_freq = get_kpi_frecuencia_uso(30)
+        st.markdown("#### 📅 Frecuencia de uso (últimos 30 días)")
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Días activos / 30",  f"{kpi_freq['dias_activos']} días")
+        b2.metric("Brecha máxima",      f"{kpi_freq['brecha_max_dias']} días sin usar")
+        b3.metric("Último registro",    kpi_freq["ultimo_registro"] or "—")
+
+        if kpi_freq["dias"]:
+            _heatmap = pd.DataFrame({"fecha": kpi_freq["dias"]})
+            _heatmap["semana"] = _heatmap["fecha"].apply(lambda d: d.strftime("%Y-W%U"))
+            _heatmap["dia"]    = _heatmap["fecha"].apply(lambda d: d.strftime("%a"))
+            _heatmap["valor"]  = 1
+            fig_heat = px.scatter(
+                _heatmap, x="semana", y="dia", size="valor",
+                title="Días con al menos 1 registro (últimos 30 días)",
+                height=220,
+            )
+            fig_heat.update_traces(marker_color="#16a34a", marker_size=14)
+            fig_heat.update_layout(showlegend=False, margin=dict(l=0, r=0, t=36, b=0),
+                                   xaxis_title="", yaxis_title="")
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── KPI 3: completitud de campos ──────────────────────────────────────
+        kpi_comp = get_kpi_completitud_campos()
+        st.markdown("#### 🗂️ Completitud de campos")
+        if kpi_comp["total"] == 0:
+            st.info("Sin registros.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Fecha del doc",  f"{kpi_comp['pct_fecha']:.0f}%",
+                      f"{kpi_comp['con_fecha']}/{kpi_comp['total']} registros")
+            c2.metric("Proveedor/Cliente", f"{kpi_comp['pct_entidad']:.0f}%",
+                      f"{kpi_comp['con_entidad']}/{kpi_comp['total']} registros")
+            c3.metric("Total ($)",      f"{kpi_comp['pct_total']:.0f}%",
+                      f"{kpi_comp['con_total']}/{kpi_comp['total']} registros")
+
+        st.markdown("---")
+
+        # ── KPI 4: uso por canal ──────────────────────────────────────────────
+        kpi_canal = get_kpi_uso_por_canal()
+        st.markdown("#### 📡 Uso por canal de captura")
+        if not kpi_canal:
+            st.info("Sin datos de canal.")
+        else:
+            _canal_df = pd.DataFrame([
+                {"Canal": MEDIO_LABEL.get(m, m), "Registros": c}
+                for m, c in kpi_canal.items()
+            ]).sort_values("Registros", ascending=False)
+            fig_canal = px.bar(
+                _canal_df, x="Canal", y="Registros",
+                color="Canal", height=280,
+            )
+            fig_canal.update_layout(showlegend=False, margin=dict(l=0, r=0, t=10, b=0),
+                                    xaxis_title="", yaxis_title="Registros")
+            st.plotly_chart(fig_canal, use_container_width=True)
