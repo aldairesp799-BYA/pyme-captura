@@ -16,8 +16,35 @@ load_dotenv(override=False)  # Railway/producción: las vars del sistema siempre
 # Secrets bridge para Railway / Render
 # (en local usa .env, en la nube las variables de entorno del servicio)
 
-from database import init_db, save_document
-from extractor import extract_from_audio_auto, extract_from_image_auto, extract_from_text_auto
+from database import (
+    init_db, save_document,
+    find_cliente, find_proveedor, find_producto_canonico, get_known_products,
+)
+from extractor import (
+    extract_from_audio_auto, extract_from_image_auto, extract_from_text_auto,
+    normalize_product_names,
+)
+
+
+def _normalize(data: dict) -> dict:
+    for field, finder in (("proveedor", find_proveedor), ("cliente", find_cliente)):
+        val = (data.get(field) or "").strip()
+        if val:
+            match = finder(val)
+            if match:
+                data[field] = match["nombre"]
+    prods = data.get("productos") or []
+    for p in prods:
+        nombre = (p.get("nombre") or "").strip()
+        if nombre:
+            canonical = find_producto_canonico(nombre)
+            if canonical:
+                p["nombre"] = canonical
+    if prods:
+        known = get_known_products()
+        if len(known) >= 3:
+            data["productos"] = normalize_product_names(prods, known)
+    return data
 
 app = FastAPI(title="PyME Captura — WhatsApp Webhook")
 init_db()
@@ -75,12 +102,13 @@ async def whatsapp(
             ct = MediaContentType0 or ""
 
             if "image" in ct:
-                data = extract_from_image_auto(media_bytes)
+                data = _normalize(extract_from_image_auto(media_bytes))
                 data["medio"] = "whatsapp_imagen"
 
             elif "audio" in ct or "ogg" in ct or "mpeg" in ct:
                 ext = "ogg" if "ogg" in ct else "mp3"
                 _, data = extract_from_audio_auto(media_bytes, f"audio.{ext}")
+                data = _normalize(data)
                 data["medio"] = "whatsapp_audio"
 
             else:
@@ -99,7 +127,7 @@ async def whatsapp(
                     "Lo registro automáticamente para ti."
                 )
                 return _xml(resp)
-            data = extract_from_text_auto(Body.strip())
+            data = _normalize(extract_from_text_auto(Body.strip()))
             data["medio"] = "whatsapp_texto"
 
         else:

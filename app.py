@@ -26,8 +26,8 @@ from database import (
     get_known_products, init_db, next_venta_publica_ref,
     save_document, update_document,
     get_catalogo_clientes, upsert_cliente, delete_cliente, find_cliente,
-    get_catalogo_proveedores, upsert_proveedor, delete_proveedor,
-    get_catalogo_productos, upsert_producto, delete_producto,
+    get_catalogo_proveedores, upsert_proveedor, delete_proveedor, find_proveedor,
+    get_catalogo_productos, upsert_producto, delete_producto, find_producto_canonico,
 )
 from extractor import (
     analyze_business, chat_with_agent,
@@ -121,7 +121,22 @@ def _groq(fn, *args, **kwargs):
 
 
 def _normalize(data: dict) -> dict:
+    # Entidad: buscar nombre canónico en catálogo
+    for field, finder in (("proveedor", find_proveedor), ("cliente", find_cliente)):
+        val = (data.get(field) or "").strip()
+        if val:
+            match = finder(val)
+            if match:
+                data[field] = match["nombre"]
+
+    # Productos: primero catálogo (exacto/alias), luego LLM contra historial
     prods = data.get("productos") or []
+    for p in prods:
+        nombre = (p.get("nombre") or "").strip()
+        if nombre:
+            canonical = find_producto_canonico(nombre)
+            if canonical:
+                p["nombre"] = canonical
     if prods:
         known = get_known_products()
         if len(known) >= 3:
